@@ -52,6 +52,7 @@ pub fn parse_callback(data: &str) -> Command {
 }
 
 /// Info statis untuk /status (tidak berubah selama runtime).
+#[derive(Clone)]
 pub struct StaticInfo {
     pub mode: Mode,
     pub armed: bool,

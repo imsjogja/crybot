@@ -5,6 +5,7 @@ edition = "2021"
 description = "Low-latency crypto copy-trading bot (Binance WS API, event-driven, Rust/tokio)"
 
 [dependencies]
+base64 = "0.22"
 tokio = { version = "1", features = ["full"] }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-native-roots"] }
 futures-util = "0.3"
@@ -22,6 +23,7 @@ dotenvy = "0.15"
 anyhow = "1"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite"] }
 axum = "0.8"
+subtle = "2.6"
 
 [profile.release]
 lto = true
