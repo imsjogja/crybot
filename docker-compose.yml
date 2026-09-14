@@ -1,0 +1,20 @@
+# Deployment produksi — lihat blueprint Bagian 8.
+# Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony,
+# region AWS Tokyo (Binance) untuk latensi terendah.
+
+services:
+  crybot:
+    build: .
+    image: crybot:latest
+    container_name: crybot
+    restart: unless-stopped
+    env_file: .env            # API keys & Telegram — JANGAN commit file ini
+    volumes:
+      - ./data:/app/data      # event log SQLite persisten
+      - ./config:/app/config:ro
+    # Bot hanya butuh egress HTTPS/WSS — tidak ada port yang diekspos.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
