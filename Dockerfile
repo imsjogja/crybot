@@ -16,12 +16,11 @@ RUN mkdir src \
     && cargo build --release \
     && rm -rf src target/release/crypto-copy-bot target/release/crypto_copy_bot-*
 
-# 2) Build source asli
+# 2) Build source asli (assets/dashboard.html di-embed via include_str!)
 COPY src ./src
+COPY assets ./assets
 COPY tests ./tests
-# COPY preserves source mtimes. Touch the crate roots so Cargo never reuses the
-# placeholder binary built in the dependency-cache layer.
-RUN touch src/main.rs src/lib.rs && cargo build --release
+RUN cargo build --release
 
 # =========================================================================
 # Stage 2 — runtime: image minimal, non-root, tanpa toolchain

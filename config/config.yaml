@@ -49,17 +49,16 @@ monitor:
   alert_on_fill: true
   # Perintah interaktif /status /stop /resume (hanya dari TELEGRAM_CHAT_ID)
   commands_enabled: true
-  # Dashboard operator dinonaktifkan secara default. Untuk deployment Docker,
-  # gunakan bind 0.0.0.0:8080 bersama publish port loopback di compose.
-  dashboard_enabled: false
-  dashboard_bind: "127.0.0.1:8080"
-  dashboard_username_env: DASHBOARD_USERNAME
-  dashboard_password_env: DASHBOARD_PASSWORD
-  # Origin wajib untuk endpoint aksi saat dashboard diaktifkan.
-  dashboard_allowed_origin: "https://crybot.dna-server.cloud"
 
 store:
   sqlite_path: data/events.db
+
+# Dashboard web — UI visual untuk pengguna awam
+web:
+  enabled: true
+  # WAJIB 127.0.0.1 kecuali di belakang reverse proxy TLS.
+  # Akses dari laptop: ssh -L 8080:127.0.0.1:8080 user@vps
+  bind: "127.0.0.1:8080"
 
 reconcile:
   # Rekonsiliasi posisi lokal vs exchange tiap N menit (0 = nonaktif).
