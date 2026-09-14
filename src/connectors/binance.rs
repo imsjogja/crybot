@@ -290,7 +290,12 @@ pub async fn fetch_balances(
         .collect::<Vec<_>>()
         .join("&");
 
-    let client = reqwest::Client::new();
+    // Timeout 5 dtk: startup tidak boleh hang bila REST tak terjangkau
+    // (bot tetap jalan dengan equity fallback dari config).
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
         .get(format!("{rest_url}/api/v3/account?{query}&signature={signature}"))
         .header("X-MBX-APIKEY", api_key)
