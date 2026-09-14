@@ -20,7 +20,11 @@ RUN mkdir src \
 COPY src ./src
 COPY assets ./assets
 COPY tests ./tests
-RUN cargo build --release
+# COPY preserves host mtimes.  The placeholder crate above is created during
+# the image build and can therefore appear newer than the real checked-out
+# roots; force Cargo to rebuild the application rather than packaging the
+# no-op placeholder binary.
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # =========================================================================
 # Stage 2 — runtime: image minimal, non-root, tanpa toolchain
