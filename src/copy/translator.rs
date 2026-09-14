@@ -25,6 +25,8 @@ pub struct CopyTranslator {
     recent_trades: VecDeque<i64>,
     pub master_equity_usdt: Decimal,
     pub follower_equity_usdt: Decimal,
+    /// Override dinamis dari UI (alokasi & cap per trade).
+    settings: Option<crate::settings::SharedSettings>,
 }
 
 pub enum TranslateResult {
@@ -46,7 +48,14 @@ impl CopyTranslator {
             recent_trades: VecDeque::new(),
             master_equity_usdt,
             follower_equity_usdt,
+            settings: None,
         }
+    }
+
+    /// Pasang override dinamis dari UI (RuntimeSettings).
+    pub fn with_settings(mut self, settings: crate::settings::SharedSettings) -> Self {
+        self.settings = Some(settings);
+        self
     }
 
     pub async fn translate(&mut self, fill: &MasterFillEvent) -> TranslateResult {
@@ -98,7 +107,16 @@ impl CopyTranslator {
             ));
         }
 
-        // 5) Sizing
+        // 5) Sizing — alokasi & cap bisa dioverride dinamis dari UI.
+        let (alloc_ov, cap_ov) = match &self.settings {
+            Some(s) => {
+                let g = s.read().await;
+                (g.allocation_usdt, g.max_per_trade_usdt)
+            }
+            None => (None, None),
+        };
+        let fixed_amount = alloc_ov.unwrap_or(self.cfg.fixed_amount_usdt);
+        let hard_cap = cap_ov.unwrap_or(self.cfg.max_per_trade_usdt);
         let master_notional = fill.price * fill.qty;
         let target_notional = match self.cfg.sizing {
             SizingModel::EquityProportional => {
@@ -107,10 +125,15 @@ impl CopyTranslator {
                 }
                 master_notional * (self.follower_equity_usdt / self.master_equity_usdt)
             }
-            SizingModel::FixedAmount => self.cfg.fixed_amount_usdt,
+            SizingModel::FixedAmount => fixed_amount,
             SizingModel::FixedRatio => master_notional * self.cfg.fixed_ratio,
         }
-        .min(self.cfg.max_per_trade_usdt);
+        .min(hard_cap);
+        // Bila alokasi diset dari UI, ia juga menjadi cap efektif untuk model non-fixed.
+        let target_notional = match alloc_ov {
+            Some(a) if self.cfg.sizing != SizingModel::FixedAmount => target_notional.min(a),
+            _ => target_notional,
+        };
 
         // Jangan pernah membulatkan naik ke minimum — risiko relatif meledak.
         if target_notional < self.cfg.min_notional_usdt {
@@ -355,6 +378,40 @@ mod tests {
         match t.translate(&fill(4, "BTCUSDT", "100", "1")).await {
             TranslateResult::Skip(r) => assert!(r.contains("burst"), "alasan salah: {r}"),
             _ => panic!("trade ke-4 harus di-skip burst guard"),
+        }
+    }
+
+    #[tokio::test]
+    async fn override_alokasi_dinamis_dari_ui() {
+        let prices = prices_with("BTCUSDT", "100", "100", 0).await;
+        let settings = crate::settings::new_shared_settings();
+        {
+            let mut g = settings.write().await;
+            g.allocation_usdt = Some(dec("25"));
+        }
+        let mut t = translator(prices, SizingModel::FixedAmount, "10000", "1000")
+            .with_settings(settings);
+        // fixed_amount config 50, tapi override UI 25 → pakai 25
+        match t.translate(&fill(1, "BTCUSDT", "100", "10")).await {
+            TranslateResult::Signal(s) => assert_eq!(s.notional_usdt, dec("25")),
+            TranslateResult::Skip(r) => panic!("harus signal: {r}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn override_cap_dinamis_membatasi_proportional() {
+        let prices = prices_with("BTCUSDT", "100", "100", 0).await;
+        let settings = crate::settings::new_shared_settings();
+        {
+            let mut g = settings.write().await;
+            g.max_per_trade_usdt = Some(dec("30"));
+        }
+        let mut t = translator(prices, SizingModel::EquityProportional, "10000", "1000")
+            .with_settings(settings);
+        // proportional 500 → cap config 200 → override UI 30
+        match t.translate(&fill(1, "BTCUSDT", "100", "50")).await {
+            TranslateResult::Signal(s) => assert_eq!(s.notional_usdt, dec("30")),
+            TranslateResult::Skip(r) => panic!("harus signal: {r}"),
         }
     }
 }

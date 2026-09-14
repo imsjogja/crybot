@@ -339,3 +339,176 @@ pub type SharedOrderClient = Arc<Mutex<WsApiClient>>;
 pub async fn connect_order_client(ws_api_url: &str) -> Result<SharedOrderClient> {
     Ok(Arc::new(Mutex::new(WsApiClient::connect(ws_api_url).await?)))
 }
+
+// ---------------------------------------------------------------------------
+// Futures REST — leverage, algo order (SL/TP), positionRisk, market close
+// (Guard path — bukan hot path order; REST cukup)
+// ---------------------------------------------------------------------------
+
+fn rest_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new())
+}
+
+async fn signed_rest(
+    method: reqwest::Method,
+    rest_url: &str,
+    path: &str,
+    mut params: BTreeMap<String, String>,
+    api_key: &str,
+    secret: &str,
+) -> Result<Value> {
+    params.insert("timestamp".into(), now_ms().to_string());
+    let signature = sign_hmac(&params, secret);
+    let query = params
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("&");
+    let url = format!("{rest_url}{path}?{query}&signature={signature}");
+    let resp = rest_client()
+        .request(method, &url)
+        .header("X-MBX-APIKEY", api_key)
+        .send()
+        .await
+        .with_context(|| format!("REST {path} gagal"))?;
+    let status = resp.status();
+    let body: Value = resp.json().await.context("REST JSON invalid")?;
+    if !status.is_success() {
+        anyhow::bail!("REST {path} HTTP {status}: {body}");
+    }
+    Ok(body)
+}
+
+/// Set leverage futures per symbol (dipanggil saat startup / perubahan setting).
+pub async fn set_leverage(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+    symbol: &str,
+    leverage: u32,
+) -> Result<()> {
+    let mut p = BTreeMap::new();
+    p.insert("symbol".into(), symbol.into());
+    p.insert("leverage".into(), leverage.to_string());
+    signed_rest(reqwest::Method::POST, rest_url, "/fapi/v1/leverage", p, api_key, secret).await?;
+    Ok(())
+}
+
+/// Pasang STOP_MARKET via Algo Order API (wajib sejak /fapi/v1/order menolak
+/// STOP/TP dengan error -4120, Des 2025). Mengembalikan algoId.
+pub async fn place_stop_market(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+    symbol: &str,
+    close_side: Side, // SELL untuk menutup long, BUY untuk menutup short
+    trigger_price: Decimal,
+) -> Result<i64> {
+    let mut p = BTreeMap::new();
+    p.insert("algoType".into(), "CONDITIONAL".into());
+    p.insert("symbol".into(), symbol.into());
+    p.insert("side".into(), close_side.as_binance().into());
+    p.insert("type".into(), "STOP_MARKET".into());
+    p.insert("triggerPrice".into(), trigger_price.normalize().to_string());
+    p.insert("closePosition".into(), "true".into());
+    p.insert("workingType".into(), "MARK_PRICE".into());
+    let v = signed_rest(reqwest::Method::POST, rest_url, "/fapi/v1/algoOrder", p, api_key, secret).await?;
+    v.get("algoId")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| anyhow!("algoOrder tanpa algoId: {v}"))
+}
+
+/// Tutup posisi secara market (reduceOnly) — untuk flatten & safety-net.
+pub async fn close_position_market(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+    symbol: &str,
+    close_side: Side,
+    qty: Decimal,
+) -> Result<()> {
+    let mut p = BTreeMap::new();
+    p.insert("symbol".into(), symbol.into());
+    p.insert("side".into(), close_side.as_binance().into());
+    p.insert("type".into(), "MARKET".into());
+    p.insert("quantity".into(), qty.normalize().to_string());
+    p.insert("reduceOnly".into(), "true".into());
+    signed_rest(reqwest::Method::POST, rest_url, "/fapi/v1/order", p, api_key, secret).await?;
+    Ok(())
+}
+
+/// Saldo USDT akun futures (untuk sizing & ekuitas dashboard).
+pub async fn fetch_usdt_balance_futures(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+) -> Result<Decimal> {
+    let v = signed_rest(
+        reqwest::Method::GET,
+        rest_url,
+        "/fapi/v2/balance",
+        BTreeMap::new(),
+        api_key,
+        secret,
+    )
+    .await?;
+    let arr = v.as_array().cloned().unwrap_or_default();
+    Ok(arr
+        .iter()
+        .find(|a| a.get("asset").and_then(|x| x.as_str()) == Some("USDT"))
+        .and_then(|a| a.get("balance").and_then(|b| b.as_str()).map(String::from))
+        .and_then(|s| Decimal::from_str(&s).ok())
+        .unwrap_or(Decimal::ZERO))
+}
+
+/// Batalkan algo order (STOP/TP) berdasarkan algoId.
+pub async fn cancel_algo_order(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+    symbol: &str,
+    algo_id: i64,
+) -> Result<()> {
+    let mut p = BTreeMap::new();
+    p.insert("symbol".into(), symbol.into());
+    p.insert("algoId".into(), algo_id.to_string());
+    signed_rest(reqwest::Method::DELETE, rest_url, "/fapi/v1/algoOrder", p, api_key, secret).await?;
+    Ok(())
+}
+
+/// Posisi terbuka riil di exchange: (symbol, positionAmt bertanda, abs notional USDT).
+pub async fn fetch_open_positions(
+    rest_url: &str,
+    api_key: &str,
+    secret: &str,
+) -> Result<Vec<(String, Decimal, Decimal)>> {
+    let v = signed_rest(
+        reqwest::Method::GET,
+        rest_url,
+        "/fapi/v2/positionRisk",
+        BTreeMap::new(),
+        api_key,
+        secret,
+    )
+    .await?;
+    let arr = v.as_array().cloned().unwrap_or_default();
+    Ok(arr
+        .iter()
+        .filter_map(|p| {
+            let symbol = p.get("symbol")?.as_str()?.to_string();
+            let amt = p
+                .get("positionAmt")?
+                .as_str()
+                .and_then(|s| Decimal::from_str(s).ok())?;
+            let notional = p
+                .get("notional")
+                .and_then(|n| n.as_str())
+                .and_then(|s| Decimal::from_str(s).ok())
+                .unwrap_or(Decimal::ZERO);
+            (!amt.is_zero()).then_some((symbol, amt, notional.abs()))
+        })
+        .collect())
+}

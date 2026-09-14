@@ -156,6 +156,7 @@ impl ExecutionEngine {
 }
 
 /// Task: konsumsi OrderEvent -> eksekusi -> FollowerFillEvent + feedback posisi + log + alert.
+/// `tx_guard`: broadcast fill ke Guard (SL safety-net). None = guard nonaktif.
 pub async fn run_execution(
     mut rx: mpsc::Receiver<OrderEvent>,
     mut engine: ExecutionEngine,
@@ -164,6 +165,7 @@ pub async fn run_execution(
     tx_monitor: mpsc::Sender<MonitorMsg>,
     alert_on_fill: bool,
     metrics: crate::metrics::SharedMetrics,
+    tx_guard: Option<crate::risk::guard::GuardFillTx>,
 ) {
     while let Some(order) = rx.recv().await {
         metrics.inc(&metrics.orders);
@@ -183,6 +185,14 @@ pub async fn run_execution(
                 let _ = tx_fill_feedback
                     .send((fill.symbol.clone(), fill.side, fill.qty, fill.price))
                     .await;
+                if let Some(txg) = &tx_guard {
+                    let _ = txg.send(crate::risk::guard::GuardFill {
+                        symbol: fill.symbol.clone(),
+                        side: fill.side,
+                        qty: fill.qty,
+                        price: fill.price,
+                    });
+                }
                 let _ = tx_log
                     .send(LogEntry {
                         kind: "follower_fill".into(),

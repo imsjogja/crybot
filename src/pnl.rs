@@ -1,15 +1,20 @@
 //! PnL Tracker — realized PnL metode average-cost per symbol.
 //! Diupdate dari feedback fill Execution Engine (di luar hot path order).
 //! Menjadi sumber data kartu "Ekuitas & PnL" di dashboard web dan /status Telegram.
+//!
+//! Mode spot: qty selalu >= 0, SELL berlebih diabaikan.
+//! Mode futures (`allow_short`): qty bertanda (negatif = short), flip arah didukung.
 
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::config::Market;
 use crate::events::{now_ms, Side};
 
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SymbolBook {
+    /// Kuantitas bertanda: positif = long, negatif = short.
     pub qty: Decimal,
     pub avg_cost: Decimal,
 }
@@ -24,12 +29,21 @@ pub struct PnlTracker {
     closed: u64,
     /// Dari `closed`, yang berakhir profit.
     wins: u64,
+    /// Futures: izinkan posisi short (qty negatif).
+    allow_short: bool,
 }
 
 pub type SharedPnl = Arc<Mutex<PnlTracker>>;
 
 pub fn new_shared_pnl() -> SharedPnl {
     Arc::new(Mutex::new(PnlTracker::default()))
+}
+
+pub fn new_shared_pnl_for(market: Market) -> SharedPnl {
+    Arc::new(Mutex::new(PnlTracker {
+        allow_short: market == Market::Futures,
+        ..Default::default()
+    }))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -63,36 +77,79 @@ impl PnlTracker {
         }
     }
 
+    fn count_closed(&mut self, realized: Decimal) {
+        self.closed += 1;
+        if realized > Decimal::ZERO {
+            self.wins += 1;
+        }
+    }
+
     /// Catat fill follower. Mengembalikan realized PnL dari fill ini
-    /// (non-zero hanya untuk SELL yang menutup posisi).
+    /// (non-zero hanya untuk bagian fill yang menutup posisi).
     pub fn update(&mut self, symbol: &str, side: Side, qty: Decimal, price: Decimal) -> Decimal {
         self.roll_day();
-        let book = self.books.entry(symbol.to_string()).or_default();
+        let mut closed_now = false;
         let mut realized = Decimal::ZERO;
-        match side {
-            Side::Buy => {
-                let total_cost = book.avg_cost * book.qty + price * qty;
-                book.qty += qty;
-                book.avg_cost = if book.qty.is_zero() {
-                    Decimal::ZERO
-                } else {
-                    total_cost / book.qty
-                };
-            }
-            Side::Sell => {
-                // Hanya qty yang memang dipegang; kelebihan diabaikan
-                // (konsisten dengan clamp defensif Risk Manager).
-                let closing = qty.min(book.qty);
-                realized = (price - book.avg_cost) * closing;
-                book.qty -= closing;
-                if book.qty.is_zero() {
-                    self.closed += 1;
-                    if realized > Decimal::ZERO {
-                        self.wins += 1;
+        {
+            let book = self.books.entry(symbol.to_string()).or_default();
+            match side {
+                Side::Buy => {
+                    if book.qty >= Decimal::ZERO {
+                        // Menambah / membuka long.
+                        let total_cost = book.avg_cost * book.qty + price * qty;
+                        book.qty += qty;
+                        book.avg_cost = if book.qty.is_zero() {
+                            Decimal::ZERO
+                        } else {
+                            total_cost / book.qty
+                        };
+                    } else {
+                        // Menutup short (realized = (avg - price) * qty_ditutup).
+                        let closing = qty.min(-book.qty);
+                        realized = (book.avg_cost - price) * closing;
+                        book.qty += qty;
+                        if book.qty.is_zero() {
+                            closed_now = true;
+                            book.avg_cost = Decimal::ZERO;
+                        } else if book.qty > Decimal::ZERO {
+                            // Flip short -> long: sisa qty jadi long baru di harga ini.
+                            book.avg_cost = price;
+                        }
                     }
-                    book.avg_cost = Decimal::ZERO;
+                }
+                Side::Sell => {
+                    if !self.allow_short {
+                        // Spot: hanya qty yang memang dipegang; kelebihan diabaikan.
+                        let closing = qty.min(book.qty);
+                        realized = (price - book.avg_cost) * closing;
+                        book.qty -= closing;
+                        if book.qty.is_zero() {
+                            closed_now = true;
+                            book.avg_cost = Decimal::ZERO;
+                        }
+                    } else if book.qty > Decimal::ZERO {
+                        // Menutup long (futures).
+                        let closing = qty.min(book.qty);
+                        realized = (price - book.avg_cost) * closing;
+                        book.qty -= qty;
+                        if book.qty.is_zero() {
+                            closed_now = true;
+                            book.avg_cost = Decimal::ZERO;
+                        } else if book.qty < Decimal::ZERO {
+                            // Flip long -> short.
+                            book.avg_cost = price;
+                        }
+                    } else {
+                        // Menambah / membuka short.
+                        let total_cost = book.avg_cost * (-book.qty) + price * qty;
+                        book.qty -= qty;
+                        book.avg_cost = total_cost / (-book.qty);
+                    }
                 }
             }
+        }
+        if closed_now {
+            self.count_closed(realized);
         }
         self.realized_total += realized;
         self.realized_today += realized;
@@ -108,7 +165,7 @@ impl PnlTracker {
         }
     }
 
-    /// (symbol, qty, avg_cost) untuk posisi terbuka — dipakai hitung unrealized PnL.
+    /// (symbol, qty bertanda, avg_cost) untuk posisi terbuka — hitung unrealized PnL.
     pub fn open_books(&self) -> Vec<(String, Decimal, Decimal)> {
         self.books
             .iter()
@@ -125,6 +182,13 @@ mod tests {
 
     fn dec(s: &str) -> Decimal {
         Decimal::from_str(s).unwrap()
+    }
+
+    fn futures_tracker() -> PnlTracker {
+        PnlTracker {
+            allow_short: true,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -181,5 +245,52 @@ mod tests {
         let r = t.update("BTCUSDT", Side::Sell, dec("5"), dec("110"));
         assert_eq!(r, dec("10")); // hanya 1 yang dipegang
         assert!(t.open_books().is_empty());
+    }
+
+    #[test]
+    fn futures_short_profit_saat_harga_turun() {
+        let mut t = futures_tracker();
+        t.update("BTCUSDT", Side::Sell, dec("1"), dec("100")); // buka short
+        let books = t.open_books();
+        assert_eq!(books[0].1, dec("-1"));
+        assert_eq!(books[0].2, dec("100"));
+        let r = t.update("BTCUSDT", Side::Buy, dec("1"), dec("90")); // tutup short
+        assert_eq!(r, dec("10")); // (100-90)*1
+        assert_eq!(t.snapshot().wins, 1);
+        assert!(t.open_books().is_empty());
+    }
+
+    #[test]
+    fn futures_short_rugi_saat_harga_naik() {
+        let mut t = futures_tracker();
+        t.update("BTCUSDT", Side::Sell, dec("2"), dec("100"));
+        let r = t.update("BTCUSDT", Side::Buy, dec("2"), dec("110"));
+        assert_eq!(r, dec("-20"));
+        assert_eq!(t.snapshot().closed, 1);
+        assert_eq!(t.snapshot().wins, 0);
+    }
+
+    #[test]
+    fn futures_flip_long_ke_short() {
+        let mut t = futures_tracker();
+        t.update("BTCUSDT", Side::Buy, dec("1"), dec("100"));
+        let r = t.update("BTCUSDT", Side::Sell, dec("2"), dec("110"));
+        assert_eq!(r, dec("10")); // 1 long ditutup profit
+        let books = t.open_books();
+        assert_eq!(books[0].1, dec("-1")); // sisa jadi short
+        assert_eq!(books[0].2, dec("110")); // basis short = harga flip
+        // Tutup short di 105 → profit 5
+        let r2 = t.update("BTCUSDT", Side::Buy, dec("1"), dec("105"));
+        assert_eq!(r2, dec("5"));
+    }
+
+    #[test]
+    fn futures_avg_cost_short_menambah_posisi() {
+        let mut t = futures_tracker();
+        t.update("BTCUSDT", Side::Sell, dec("1"), dec("100"));
+        t.update("BTCUSDT", Side::Sell, dec("1"), dec("120"));
+        let books = t.open_books();
+        assert_eq!(books[0].1, dec("-2"));
+        assert_eq!(books[0].2, dec("110"));
     }
 }

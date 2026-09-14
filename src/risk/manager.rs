@@ -39,6 +39,11 @@ pub struct RiskManager {
     /// Equity awal hari — untuk batas drawdown harian.
     day_start_equity: Decimal,
     day_stamp: String,
+    /// Spot (default): SELL tanpa posisi diveto, qty tak boleh negatif.
+    /// Futures: SELL boleh membuka short, qty bertanda.
+    market: crate::config::Market,
+    /// Override dinamis dari UI (daily_loss_limit_pct dll).
+    settings: Option<crate::settings::SharedSettings>,
 }
 
 pub enum RiskDecision {
@@ -62,7 +67,29 @@ impl RiskManager {
             daily_realized_pnl: Decimal::ZERO,
             day_start_equity: start_equity,
             day_stamp: current_day(),
+            market: crate::config::Market::Spot,
+            settings: None,
         }
+    }
+
+    /// Aktifkan mode futures + override dinamis dari UI.
+    pub fn with_market_settings(
+        mut self,
+        market: crate::config::Market,
+        settings: crate::settings::SharedSettings,
+    ) -> Self {
+        self.market = market;
+        self.settings = Some(settings);
+        self
+    }
+
+    /// Batas rugi harian efektif (override UI bila ada).
+    fn daily_loss_limit(&self) -> Decimal {
+        self.settings
+            .as_ref()
+            .and_then(|s| s.try_read().ok())
+            .and_then(|s| s.daily_loss_limit_pct)
+            .unwrap_or(self.cfg.daily_loss_limit_pct)
     }
 
     pub fn evaluate(&mut self, sig: &SignalEvent) -> RiskDecision {
@@ -92,31 +119,32 @@ impl RiskManager {
         }
 
         // Batas rugi harian
+        let loss_limit = self.daily_loss_limit();
         if !self.day_start_equity.is_zero() {
             let loss_pct = (-self.daily_realized_pnl / self.day_start_equity) * Decimal::from(100);
-            if loss_pct >= self.cfg.daily_loss_limit_pct {
+            if loss_pct >= loss_limit {
                 return RiskDecision::Veto(RiskEvent {
                     reason: "daily_loss_limit".into(),
                     detail: format!(
-                        "rugi harian {loss_pct:.2}% >= {}% — stop buka posisi baru",
-                        self.cfg.daily_loss_limit_pct
+                        "rugi harian {loss_pct:.2}% >= {loss_limit}% — stop buka posisi baru"
                     ),
                     ts_ms: now_ms(),
                 });
             }
         }
 
-        let (already_holding, open_count) = {
+        let (pos_qty, open_count) = {
             let pos = self.positions.read().expect("positions lock poisoned");
-            let holding = pos
-                .get(&sig.symbol)
-                .map(|q| !q.is_zero())
-                .unwrap_or(false);
+            let q = pos.get(&sig.symbol).copied().unwrap_or(Decimal::ZERO);
             let count = pos.values().filter(|q| !q.is_zero()).count() as u32;
-            (holding, count)
+            (q, count)
         };
+        let already_holding = !pos_qty.is_zero();
 
-        let is_opening = !already_holding || sig.side == Side::Buy;
+        // Opening = posisi baru, atau menambah searah (long+BUY / short+SELL).
+        let is_opening = !already_holding
+            || (pos_qty > Decimal::ZERO && sig.side == Side::Buy)
+            || (pos_qty < Decimal::ZERO && sig.side == Side::Sell);
 
         // Batas jumlah posisi terbuka
         if is_opening && !already_holding && open_count >= self.max_open_positions {
@@ -127,8 +155,8 @@ impl RiskManager {
             });
         }
 
-        // SELL di spot tanpa posisi -> tolak (short spot tidak didukung v1)
-        if sig.side == Side::Sell && !already_holding {
+        // SELL di spot tanpa posisi -> tolak. Di futures, SELL = buka short (sah).
+        if self.market == crate::config::Market::Spot && sig.side == Side::Sell && !already_holding {
             return RiskDecision::Veto(RiskEvent {
                 reason: "no_position_to_close".into(),
                 detail: format!("SELL {} tanpa posisi terbuka", sig.symbol),
@@ -153,8 +181,8 @@ impl RiskManager {
             Side::Buy => *entry += qty,
             Side::Sell => *entry -= qty,
         }
-        if entry.is_sign_negative() {
-            *entry = Decimal::ZERO; // clamp defensif
+        if entry.is_sign_negative() && self.market == crate::config::Market::Spot {
+            *entry = Decimal::ZERO; // clamp defensif (spot)
         }
     }
 
@@ -375,5 +403,54 @@ mod tests {
         assert_eq!(m.open_positions(), 2);
         m.apply_fill("BTCUSDT", Side::Sell, dec("0.2"));
         assert_eq!(m.open_positions(), 1);
+    }
+
+    fn futures_manager(armed: bool, max_pos: u32) -> (RiskManager, SharedPositions) {
+        let positions = new_shared_positions();
+        let m = RiskManager::new(
+            risk_cfg(armed),
+            max_pos,
+            dec("1000"),
+            positions.clone(),
+            new_halt_flag(),
+        )
+        .with_market_settings(
+            crate::config::Market::Futures,
+            crate::settings::new_shared_settings(),
+        );
+        (m, positions)
+    }
+
+    #[test]
+    fn futures_sell_tanpa_posisi_membuka_short() {
+        let (mut m, _) = futures_manager(true, 3);
+        match m.evaluate(&signal("BTCUSDT", Side::Sell, "0.1")) {
+            RiskDecision::Approved(o) => assert_eq!(o.side, Side::Sell),
+            _ => panic!("futures: SELL pembuka short harus approved"),
+        }
+    }
+
+    #[test]
+    fn futures_apply_fill_boleh_negatif() {
+        let (mut m, positions) = futures_manager(true, 3);
+        m.apply_fill("BTCUSDT", Side::Sell, dec("0.5"));
+        let pos = positions.read().unwrap();
+        assert_eq!(pos.get("BTCUSDT"), Some(&dec("-0.5")));
+    }
+
+    #[test]
+    fn futures_menambah_short_tidak_dihitung_posisi_baru() {
+        let (mut m, _) = futures_manager(true, 1);
+        m.apply_fill("BTCUSDT", Side::Sell, dec("0.5")); // short BTC
+        // SELL lagi di symbol sama = menambah short, bukan posisi baru → lolos cap 1
+        match m.evaluate(&signal("BTCUSDT", Side::Sell, "0.1")) {
+            RiskDecision::Approved(_) => {}
+            _ => panic!("menambah short existing harus approved"),
+        }
+        // Simbol baru tetap kena cap
+        match m.evaluate(&signal("ETHUSDT", Side::Sell, "1")) {
+            RiskDecision::Veto(ev) => assert_eq!(ev.reason, "max_positions"),
+            _ => panic!("harus veto max_positions"),
+        }
     }
 }
