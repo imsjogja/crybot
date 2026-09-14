@@ -17,6 +17,7 @@ use crypto_copy_bot::copy::translator::{run_translator, CopyTranslator};
 use crypto_copy_bot::events::{LogEntry, MasterFillEvent, MonitorMsg, OrderEvent, SignalEvent};
 use crypto_copy_bot::execution::engine::{run_execution, ExecutionEngine};
 use crypto_copy_bot::metrics::{self, new_shared_metrics};
+use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
 use crypto_copy_bot::monitor::telegram::{run_monitor, TelegramAlerter};
 use crypto_copy_bot::reconcile;
 use crypto_copy_bot::risk::manager::{
@@ -117,10 +118,9 @@ async fn main() -> Result<()> {
     };
 
     let pool = store::init_pool(&cfg.store.sqlite_path).await?;
-    let tg = TelegramAlerter::new(
-        std::env::var(&cfg.monitor.telegram_bot_token_env).unwrap_or_default(),
-        std::env::var(&cfg.monitor.telegram_chat_id_env).unwrap_or_default(),
-    );
+    let tg_token = std::env::var(&cfg.monitor.telegram_bot_token_env).unwrap_or_default();
+    let tg_chat = std::env::var(&cfg.monitor.telegram_chat_id_env).unwrap_or_default();
+    let tg = TelegramAlerter::new(tg_token.clone(), tg_chat.clone());
 
     // --- Spawn tasks -------------------------------------------------------------
     let mut handles = Vec::new();
@@ -158,7 +158,24 @@ async fn main() -> Result<()> {
         cfg.monitor.alert_on_fill,
         metrics.clone(),
     )));
-    handles.push(tokio::spawn(run_monitor(rx_monitor, tg)));
+    handles.push(tokio::spawn(run_monitor(rx_monitor, tg.clone())));
+    if cfg.monitor.commands_enabled {
+        handles.push(tokio::spawn(run_command_listener(
+            tg_token,
+            tg_chat,
+            tg.clone(),
+            StaticInfo {
+                mode: cfg.mode,
+                armed: cfg.risk.armed,
+                pairs: cfg.copy.symbol_allowlist.clone(),
+            },
+            metrics.clone(),
+            positions.clone(),
+            halt.clone(),
+            tx_monitor.clone(),
+            tx_shutdown.clone(),
+        )));
+    }
     handles.push(tokio::spawn(run_store(rx_log, pool)));
     handles.push(tokio::spawn(reconcile::run_reconciler(
         cfg.reconcile.clone(),
@@ -206,8 +223,12 @@ async fn main() -> Result<()> {
 
     tracing::info!("semua komponen berjalan — Ctrl+C untuk berhenti");
 
-    // --- Shutdown graceful ---------------------------------------------------------
-    tokio::signal::ctrl_c().await?;
+    // --- Shutdown graceful (Ctrl+C ATAU perintah /stop Telegram) --------------------
+    let mut rx_sd = tx_shutdown.subscribe();
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => { r?; },
+        _ = async { while rx_sd.changed().await.is_ok() { if *rx_sd.borrow() { break; } } } => {}
+    }
     tracing::info!("shutdown diminta...");
     let _ = tx_shutdown.send(true);
     drop(tx_monitor);

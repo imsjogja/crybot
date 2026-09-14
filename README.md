@@ -23,9 +23,10 @@ Akun Master ──WS API user data──> MasterFeed ──> CopyTranslator ─�
 | Master feed | `src/connectors/binance.rs` | User data stream via **WebSocket API** (signed), reconnect otomatis |
 | Market data | `src/connectors/binance.rs` | bookTicker mainnet untuk slippage guard |
 | Translator | `src/copy/translator.rs` | Dedup, allowlist, burst guard, slippage guard, sizing |
-| Risk | `src/risk/manager.rs` | Kill switch (`armed`), daily loss limit, max positions, position map |
+| Risk | `src/risk/manager.rs` | Kill switch (`armed`), halt flag, daily loss limit, max positions |
 | Execution | `src/execution/engine.rs` | Paper (simulasi) / order MARKET via WS API (testnet/live) |
-| Monitor | `src/monitor/telegram.rs` | Alert Telegram, non-blocking |
+| Monitor | `src/monitor/telegram.rs` | Alert Telegram satu arah, non-blocking |
+| Commands | `src/monitor/commands.rs` | Perintah interaktif `/status` `/stop` `/resume` |
 | Store | `src/store.rs` | Event log append-only SQLite, di luar hot path |
 | Reconcile | `src/reconcile.rs` | Rekonsiliasi posisi vs exchange + auto-halt |
 | Metrics | `src/metrics.rs` | Latensi p50/p95/p99, skip rate, laporan berkala |
@@ -57,11 +58,25 @@ docker logs -f crybot
 
 Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony, region **AWS Tokyo (ap-northeast-1)** untuk Binance. Container tidak mengekspos port apa pun; event log SQLite persisten di volume `./data`.
 
+## Perintah Telegram interaktif
+
+Listener `getUpdates` long-polling merespons **hanya** dari `TELEGRAM_CHAT_ID` terkonfigurasi (pengirim lain diabaikan total dan di-log sebagai warning):
+
+| Perintah | Aksi |
+|---|---|
+| `/status` | Mode, armed, halt, pairs, posisi terbuka, metrik latensi p50/p95/p99 + skip rate |
+| `/stop` | Graceful shutdown bot (kill switch jarak jauh) |
+| `/resume` | Clear halt flag setelah mismatch rekonsiliasi **ditinjau manusia** — tercatat sebagai warning |
+| `/help` | Daftar perintah |
+
+Nonaktifkan dengan `monitor.commands_enabled: false`.
+
 ## Checklist keamanan (wajib sebelum live)
 
 - [ ] Key master: **read-only** (Enable Reading saja)
 - [ ] Key follower: withdrawal **OFF**, **IP whitelist** ke IP statis server, spot only, di **sub-akun**
 - [ ] `.env` tidak pernah masuk git (sudah di-.gitignore)
+- [ ] `TELEGRAM_CHAT_ID` terverifikasi milik Anda (satu-satunya otoritas perintah)
 - [ ] `max_per_trade_usdt` diset konservatif
 - [ ] Alert Telegram terverifikasi menerima pesan start
 - [ ] Modal awal 10–25% dari alokasi copy (yang sendirinya 20–30% modal)
@@ -76,7 +91,7 @@ Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chron
 ## Testing
 
 ```bash
-cargo test                                              # 27 unit test (hermetik, tanpa jaringan)
+cargo test                                              # 30 unit test (hermetik, tanpa jaringan)
 cargo test --test public_stream -- --ignored --nocapture # integration test live (butuh jaringan)
 ```
 
@@ -85,6 +100,7 @@ Cakupan unit test (replay event, tanpa koneksi live):
 - **Risk Manager (9):** kill switch `armed`, halt flag reconciler, approve buy/sell, veto sell tanpa posisi, max positions (+add ke posisi existing tetap boleh), daily loss limit, clamp posisi negatif, hitungan posisi.
 - **Reconciler (4):** kalkulasi drift posisi lokal vs exchange.
 - **Metrics (4):** percentile p50/p95/p99, window cap, skip rate, snapshot kosong.
+- **Commands (3):** parsing perintah Telegram (suffix bot, argumen, non-perintah).
 
 Integration test (`tests/public_stream.rs`, `#[ignore]` secara default):
 - `public_stream_bookticker` — verifikasi jalur market data riil tanpa key. **Catatan:** Binance mengembalikan HTTP 451 (geo-block) dari IP yurisdiksi terbatas; jalankan dari VPS deployment (mis. AWS Tokyo), bukan dari sembarang jaringan.
@@ -96,14 +112,13 @@ Modul `metrics` mencatat rolling window (2048 sampel): latensi deteksi (event ma
 
 ## Rekonsiliasi & auto-halt (aturan keras blueprint)
 
-Task `reconcile` berjalan tiap `reconcile.interval_min` menit (default 60) di mode testnet/live: membandingkan posisi lokal per pair dengan saldo riil di exchange; drift > `tolerance_pct` → **alert kritis Telegram + halt flag aktif** — Risk Manager mem-veto semua order baru (`halted_reconcile`) sampai bot di-restart manual secara sadar (sesuai prinsip kill switch blueprint). Otomatis nonaktif di mode paper.
+Task `reconcile` berjalan tiap `reconcile.interval_min` menit (default 60) di mode testnet/live: membandingkan posisi lokal per pair dengan saldo riil di exchange; drift > `tolerance_pct` → **alert kritis Telegram + halt flag aktif** — Risk Manager mem-veto semua order baru (`halted_reconcile`) sampai operator meninjau dan mengirim `/resume` (atau merestart bot).
 
 ## Batasan scaffold ini (iterasi berikutnya)
 
 - Sizing equity memakai saldo **USDT saja** (aset lain belum divaluasi).
 - `kill_switch_drawdown_pct` belum diwire ke auto-liquidate (saat ini proteksi aktif: daily loss limit + halt reconciler).
 - Futures/reduce-only belum didukung — v1 spot saja, sesuai blueprint.
-- Belum ada perintah Telegram interaktif (`/status`, `/stop`) — alerting satu arah.
 - Rekonsiliasi baru membandingkan **qty posisi**, belum valuasi equity total.
 
 ## Struktur
@@ -117,7 +132,7 @@ crypto-copy-bot/
 ├── config/config.yaml     # parameter non-rahasia
 ├── data/                  # SQLite event log (dibuat otomatis)
 ├── src/
-│   ├── main.rs            # wiring + graceful shutdown
+│   ├── main.rs            # wiring + graceful shutdown (Ctrl+C atau /stop)
 │   ├── lib.rs
 │   ├── events.rs          # tipe event
 │   ├── config.rs          # loader config
@@ -125,7 +140,8 @@ crypto-copy-bot/
 │   ├── copy/translator.rs
 │   ├── risk/manager.rs
 │   ├── execution/engine.rs
-│   ├── monitor/telegram.rs
+│   ├── monitor/telegram.rs   # alert satu arah
+│   ├── monitor/commands.rs   # perintah /status /stop /resume
 │   ├── metrics.rs
 │   ├── reconcile.rs
 │   └── store.rs

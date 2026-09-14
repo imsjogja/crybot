@@ -108,10 +108,17 @@ pub struct MonitorCfg {
     /// Interval laporan metrik (p50/p95/p99, skip rate) ke Telegram. 0 = nonaktif.
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval_min: u64,
+    /// Perintah interaktif /status /stop /resume via getUpdates polling.
+    #[serde(default = "default_commands_enabled")]
+    pub commands_enabled: bool,
 }
 
 fn default_metrics_interval() -> u64 {
     60
+}
+
+fn default_commands_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize)]
