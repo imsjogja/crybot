@@ -19,7 +19,9 @@ RUN mkdir src \
 # 2) Build source asli
 COPY src ./src
 COPY tests ./tests
-RUN cargo build --release
+# COPY preserves source mtimes. Touch the crate roots so Cargo never reuses the
+# placeholder binary built in the dependency-cache layer.
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # =========================================================================
 # Stage 2 — runtime: image minimal, non-root, tanpa toolchain
