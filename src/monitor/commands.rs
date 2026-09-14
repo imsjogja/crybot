@@ -172,6 +172,7 @@ Gunakan tombol di bawah, atau ketik perintah:\n\
 /help — pesan ini";
 
 /// Eksekusi perintah (dipakai oleh pesan teks maupun tombol).
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     cmd: Command,
     alerter: &TelegramAlerter,
@@ -249,9 +250,8 @@ pub async fn run_command_listener(
         .await;
 
     loop {
-        let url = format!(
-            "https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30"
-        );
+        let url =
+            format!("https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30");
         let updates: Value = match client.get(&url).send().await {
             Ok(r) => match r.json().await {
                 Ok(v) => v,
@@ -302,14 +302,18 @@ pub async fn run_command_listener(
             }
 
             // --- Jalur 2: pesan teks --------------------------------------------
-            let Some(msg) = upd.get("message") else { continue };
+            let Some(msg) = upd.get("message") else {
+                continue;
+            };
             let sender = msg.pointer("/chat/id").and_then(Value::as_i64);
             // Otorisasi keras: abaikan siapa pun selain chat terkonfigurasi.
             if sender != Some(auth_chat_id) {
                 tracing::warn!(?sender, "pesan dari chat tidak dikenal — diabaikan");
                 continue;
             }
-            let Some(text) = msg.get("text").and_then(Value::as_str) else { continue };
+            let Some(text) = msg.get("text").and_then(Value::as_str) else {
+                continue;
+            };
             dispatch(
                 parse_command(text),
                 &alerter,

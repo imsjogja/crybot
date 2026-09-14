@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::mpsc;
 
 use crate::config::RiskCfg;
-use crate::events::{now_ms, MonitorMsg, OrderEvent, RiskEvent, SignalEvent, Side};
+use crate::events::{now_ms, MonitorMsg, OrderEvent, RiskEvent, Side, SignalEvent, StrategySource};
 
 /// Peta posisi copy terbuka: symbol -> qty bersih base asset.
 /// Di-share ke Reconciler; akses selalu singkat (tanpa await di dalam lock).
@@ -66,6 +66,17 @@ impl RiskManager {
     }
 
     pub fn evaluate(&mut self, sig: &SignalEvent) -> RiskDecision {
+        if sig.strategy != StrategySource::CopyTrade {
+            return RiskDecision::Veto(RiskEvent {
+                reason: "base_strategy_requires_base_executor".into(),
+                detail: format!(
+                    "strategy {} requires a typed Base executor path",
+                    sig.strategy
+                ),
+                ts_ms: now_ms(),
+            });
+        }
+
         // Kill switch: armed=false berarti tidak ada order sama sekali.
         if !self.cfg.armed {
             return RiskDecision::Veto(RiskEvent {
@@ -108,10 +119,7 @@ impl RiskManager {
 
         let (already_holding, open_count) = {
             let pos = self.positions.read().expect("positions lock poisoned");
-            let holding = pos
-                .get(&sig.symbol)
-                .map(|q| !q.is_zero())
-                .unwrap_or(false);
+            let holding = pos.get(&sig.symbol).map(|q| !q.is_zero()).unwrap_or(false);
             let count = pos.values().filter(|q| !q.is_zero()).count() as u32;
             (holding, count)
         };
@@ -267,6 +275,7 @@ mod tests {
             deviation_pct: dec("0"),
             detect_latency_ms: 5,
             ts_ms: now_ms(),
+            strategy: StrategySource::CopyTrade,
         }
     }
 
@@ -280,6 +289,34 @@ mod tests {
             new_halt_flag(),
         );
         (m, positions)
+    }
+
+    #[test]
+    fn veto_base_strategy_meski_sinyal_observasional_berkuantitas_nol() {
+        let (mut m, _) = manager(true, 3);
+        let mut sig = signal("WETH/USDC", Side::Buy, "0");
+        sig.strategy = StrategySource::GridDca;
+
+        match m.evaluate(&sig) {
+            RiskDecision::Veto(ev) => {
+                assert_eq!(ev.reason, "base_strategy_requires_base_executor")
+            }
+            _ => panic!("Base signal tidak boleh mencapai Binance executor"),
+        }
+    }
+
+    #[test]
+    fn veto_base_strategy_sebelum_pemeriksaan_armed() {
+        let (mut m, _) = manager(false, 3);
+        let mut sig = signal("WETH/USDC", Side::Buy, "0");
+        sig.strategy = StrategySource::Sniper;
+
+        match m.evaluate(&sig) {
+            RiskDecision::Veto(ev) => {
+                assert_eq!(ev.reason, "base_strategy_requires_base_executor")
+            }
+            _ => panic!("Base signal tidak boleh mencapai Binance executor"),
+        }
     }
 
     #[test]

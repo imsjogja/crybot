@@ -12,9 +12,13 @@ use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 
 use crypto_copy_bot::config::{env_secret, AppConfig, Mode};
-use crypto_copy_bot::connectors::binance as binance;
+use crypto_copy_bot::connectors::base::BaseConnector;
+use crypto_copy_bot::connectors::binance;
 use crypto_copy_bot::copy::translator::{run_translator, CopyTranslator};
-use crypto_copy_bot::events::{LogEntry, MasterFillEvent, MonitorMsg, OrderEvent, SignalEvent};
+use crypto_copy_bot::events::{
+    LogEntry, MasterFillEvent, MonitorMsg, OrderEvent, SignalEvent, StrategyEvent,
+};
+use crypto_copy_bot::execution::base_executor::{run_base_execution, BaseExecutor, BaseOrder};
 use crypto_copy_bot::execution::engine::{run_execution, ExecutionEngine};
 use crypto_copy_bot::metrics::{self, new_shared_metrics};
 use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
@@ -25,6 +29,7 @@ use crypto_copy_bot::risk::manager::{
     new_halt_flag, new_shared_positions, run_risk_manager, FillFeedback, RiskManager,
 };
 use crypto_copy_bot::store::{self, run_store};
+use crypto_copy_bot::strategies::{SharedState, StrategyEngine};
 use crypto_copy_bot::web::{self, WebState};
 
 #[tokio::main]
@@ -32,8 +37,7 @@ async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -57,6 +61,8 @@ async fn main() -> Result<()> {
     let (tx_signal, rx_signal) = mpsc::channel::<SignalEvent>(1024);
     let (tx_order, rx_order) = mpsc::channel::<OrderEvent>(256);
     let (tx_fill_fb, rx_fill_fb) = mpsc::channel::<FillFeedback>(256);
+    let (tx_strategy_event, rx_strategy_event) = mpsc::channel::<StrategyEvent>(1024);
+    let (tx_base_order, rx_base_order) = mpsc::channel::<BaseOrder>(256);
     let (tx_log, rx_log) = mpsc::channel::<LogEntry>(4096);
     let (tx_monitor, rx_monitor) = mpsc::channel::<MonitorMsg>(256);
     let (tx_shutdown, rx_shutdown) = watch::channel(false);
@@ -64,19 +70,16 @@ async fn main() -> Result<()> {
     let prices = binance::new_shared_prices();
 
     // --- Equity untuk sizing ---------------------------------------------------
-    let master_equity = match binance::fetch_usdt_balance(
-        "https://api.binance.com",
-        &master_key,
-        &master_secret,
-    )
-    .await
-    {
-        Ok(eq) if !eq.is_zero() => eq,
-        _ => {
-            tracing::warn!("equity master gagal diquery — pakai fallback config");
-            cfg.master.fallback_equity_usdt
-        }
-    };
+    let master_equity =
+        match binance::fetch_usdt_balance("https://api.binance.com", &master_key, &master_secret)
+            .await
+        {
+            Ok(eq) if !eq.is_zero() => eq,
+            _ => {
+                tracing::warn!("equity master gagal diquery — pakai fallback config");
+                cfg.master.fallback_equity_usdt
+            }
+        };
     let follower_equity = if cfg.mode.is_paper() {
         cfg.follower.fallback_equity_usdt
     } else {
@@ -128,6 +131,49 @@ async fn main() -> Result<()> {
 
     // --- Spawn tasks -------------------------------------------------------------
     let mut handles = Vec::new();
+
+    if let Some(base_cfg) = cfg.base.as_ref() {
+        let connector = BaseConnector::new(base_cfg)?;
+        let executor = BaseExecutor::new(base_cfg, cfg.mode.is_paper())?;
+        let shared = SharedState {
+            config: cfg.strategies.clone(),
+            base_addresses: base_cfg.addresses.clone(),
+            pool: pool.clone(),
+            tx_signal: tx_signal.clone(),
+            tx_log: tx_log.clone(),
+            tx_monitor: tx_monitor.clone(),
+            tx_base_order,
+        };
+        let strategy_engine = StrategyEngine::new(&cfg, rx_strategy_event, shared);
+        let base_shutdown = rx_shutdown.clone();
+
+        handles.push(tokio::spawn(async move {
+            connector
+                .run_event_loop(tx_strategy_event, base_shutdown)
+                .await;
+        }));
+        handles.push(tokio::spawn(run_base_execution(
+            rx_base_order,
+            executor,
+            tx_log.clone(),
+            tx_monitor.clone(),
+            metrics.clone(),
+        )));
+        handles.push(tokio::spawn(strategy_engine.run()));
+    } else if cfg.strategies.sniper.enabled
+        || cfg.strategies.copy_onchain.enabled
+        || cfg.strategies.grid_dca.enabled
+        || cfg.strategies.arbitrage.enabled
+        || cfg.strategies.yield_farming.enabled
+        || cfg.strategies.perps.enabled
+    {
+        tracing::warn!("konfigurasi Base tidak ada; strategi Base dan executor tidak dijalankan");
+        let _ = tx_monitor
+            .send(MonitorMsg::Warning(
+                "konfigurasi Base tidak ada; strategi Base dan executor tidak dijalankan".into(),
+            ))
+            .await;
+    }
 
     handles.push(tokio::spawn(binance::run_master_feed(
         // Master trading di mainnet — user data stream selalu ke mainnet WS API.
@@ -211,9 +257,13 @@ async fn main() -> Result<()> {
 
     // Dashboard web (UI visual — default hanya localhost, token via DASHBOARD_TOKEN)
     if cfg.web.enabled {
-        let token = std::env::var("DASHBOARD_TOKEN").ok().filter(|t| !t.is_empty());
+        let token = std::env::var("DASHBOARD_TOKEN")
+            .ok()
+            .filter(|t| !t.is_empty());
         if cfg.web.bind != "127.0.0.1:8080" && token.is_none() {
-            tracing::warn!("dashboard bind non-localhost TANPA DASHBOARD_TOKEN — tidak disarankan!");
+            tracing::warn!(
+                "dashboard bind non-localhost TANPA DASHBOARD_TOKEN — tidak disarankan!"
+            );
         }
         let state = std::sync::Arc::new(WebState {
             mode: cfg.mode,
@@ -226,6 +276,7 @@ async fn main() -> Result<()> {
             metrics: metrics.clone(),
             pnl: pnl.clone(),
             prices: prices.clone(),
+            strategies: cfg.strategies.clone(),
             pool: pool.clone(),
             token,
             tx_shutdown: tx_shutdown.clone(),

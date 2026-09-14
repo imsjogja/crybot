@@ -7,9 +7,8 @@ FROM rust:1-bookworm AS builder
 
 WORKDIR /app
 
-# 1) Build dependency dulu (layer cache): manifest tanpa source
-#    Cargo.loc[k] = opsional (ada di repo lokal; bila belum ada, cargo generate)
-COPY Cargo.toml Cargo.loc[k] ./
+# 1) Build dependency dulu (layer cache): manifest dan lockfile.
+COPY Cargo.toml Cargo.lock ./
 RUN mkdir src \
     && echo 'fn main() {}' > src/main.rs \
     && echo '' > src/lib.rs \

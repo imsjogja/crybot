@@ -13,6 +13,7 @@ use crate::connectors::binance::fetch_balances;
 use crate::events::{now_ms, LogEntry, MonitorMsg};
 use crate::risk::manager::{HaltFlag, SharedPositions};
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_reconciler(
     cfg: ReconcileCfg,
     mode: Mode,
@@ -40,7 +41,14 @@ pub async fn run_reconciler(
         }
 
         if let Err(e) = reconcile_once(
-            &cfg, &rest_url, &api_key, &secret, &symbols, &positions, &halt, &tx_monitor,
+            &cfg,
+            &rest_url,
+            &api_key,
+            &secret,
+            &symbols,
+            &positions,
+            &halt,
+            &tx_monitor,
             &tx_log,
         )
         .await
@@ -53,6 +61,7 @@ pub async fn run_reconciler(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn reconcile_once(
     cfg: &ReconcileCfg,
     rest_url: &str,
@@ -68,7 +77,9 @@ async fn reconcile_once(
 
     for symbol in symbols {
         // Ekstrak base asset: "BTCUSDT" -> "BTC" (v1: quote selalu USDT)
-        let Some(base) = symbol.strip_suffix("USDT") else { continue };
+        let Some(base) = symbol.strip_suffix("USDT") else {
+            continue;
+        };
 
         let exchange_qty = balances.get(base).copied().unwrap_or_default();
         let local_qty = {
@@ -93,14 +104,20 @@ async fn reconcile_once(
             halt.store(true, std::sync::atomic::Ordering::SeqCst);
             let _ = tx_monitor.send(MonitorMsg::Critical(msg.clone())).await;
             let _ = tx_log
-                .send(LogEntry { kind: "reconcile_mismatch".into(), payload: msg, ts_ms: now_ms() })
+                .send(LogEntry {
+                    kind: "reconcile_mismatch".into(),
+                    payload: msg,
+                    ts_ms: now_ms(),
+                })
                 .await;
         } else {
             tracing::info!(symbol, %local_qty, %exchange_qty, %drift_pct, "rekonsiliasi ok");
             let _ = tx_log
                 .send(LogEntry {
                     kind: "reconcile_ok".into(),
-                    payload: format!("{symbol} lokal={local_qty} exchange={exchange_qty} drift={drift_pct:.3}%"),
+                    payload: format!(
+                        "{symbol} lokal={local_qty} exchange={exchange_qty} drift={drift_pct:.3}%"
+                    ),
                     ts_ms: now_ms(),
                 })
                 .await;

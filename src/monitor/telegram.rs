@@ -4,16 +4,18 @@
 //! Dua bentuk pesan:
 //! - send()      : teks polos (alert rutin — aman untuk konten arbitrer)
 //! - send_card() : HTML + tombol inline keyboard (status/kontrol — konten
-//!                 sepenuhnya di bawah kendali bot, bukan input luar)
+//!   sepenuhnya di bawah kendali bot, bukan input luar)
 
 use tokio::sync::mpsc;
 
 use crate::events::MonitorMsg;
 
 /// Tombol kontrol utama — callback_data diproses di monitor::commands.
-pub const KEYBOARD: &[&[(&str, &str)]] = &[
-    &[("📊 Status", "status"), ("🛑 Stop", "stop"), ("▶️ Resume", "resume")],
-];
+pub const KEYBOARD: &[&[(&str, &str)]] = &[&[
+    ("📊 Status", "status"),
+    ("🛑 Stop", "stop"),
+    ("▶️ Resume", "resume"),
+]];
 
 #[derive(Clone)]
 pub struct TelegramAlerter {

@@ -56,7 +56,10 @@ impl WsApiClient {
         let (ws, _resp) = connect_async(url)
             .await
             .with_context(|| format!("gagal connect WS API: {url}"))?;
-        Ok(Self { ws, req_id: AtomicU64::new(1) })
+        Ok(Self {
+            ws,
+            req_id: AtomicU64::new(1),
+        })
     }
 
     fn next_id(&self) -> u64 {
@@ -88,9 +91,9 @@ impl WsApiClient {
     /// Baca satu pesan; mengembalikan None bila koneksi ditutup.
     pub async fn next_message(&mut self) -> Option<Result<Value>> {
         match self.ws.next().await {
-            Some(Ok(Message::Text(txt))) => Some(
-                serde_json::from_str::<Value>(&txt).map_err(|e| anyhow!("JSON invalid: {e}")),
-            ),
+            Some(Ok(Message::Text(txt))) => {
+                Some(serde_json::from_str::<Value>(&txt).map_err(|e| anyhow!("JSON invalid: {e}")))
+            }
             Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => Some(Ok(Value::Null)),
             Some(Ok(_)) => Some(Ok(Value::Null)),
             Some(Err(e)) => Some(Err(anyhow!("WS error: {e}"))),
@@ -163,7 +166,9 @@ async fn master_feed_once(
             continue;
         }
         // Event user data: {"subscriptionId":..,"event":{...}}
-        let Some(event) = v.get("event") else { continue };
+        let Some(event) = v.get("event") else {
+            continue;
+        };
         if event.get("e").and_then(Value::as_str) != Some("executionReport") {
             continue;
         }
@@ -243,13 +248,19 @@ pub async fn run_market_data(
 }
 
 async fn market_data_once(url: &str, prices: &SharedPrices) -> Result<()> {
-    let (mut ws, _) = connect_async(url).await.context("gagal connect market stream")?;
+    let (mut ws, _) = connect_async(url)
+        .await
+        .context("gagal connect market stream")?;
     tracing::info!(url, "market data: connected");
     while let Some(msg) = ws.next().await {
         let Message::Text(txt) = msg? else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(&txt) else { continue };
+        let Ok(v) = serde_json::from_str::<Value>(&txt) else {
+            continue;
+        };
         let Some(data) = v.get("data") else { continue };
-        let Some(symbol) = data.get("s").and_then(Value::as_str) else { continue };
+        let Some(symbol) = data.get("s").and_then(Value::as_str) else {
+            continue;
+        };
         let bid = data
             .get("b")
             .and_then(Value::as_str)
@@ -265,7 +276,11 @@ async fn market_data_once(url: &str, prices: &SharedPrices) -> Result<()> {
         }
         prices.write().await.insert(
             symbol.to_string(),
-            BookTicker { bid, ask, ts_ms: now_ms() },
+            BookTicker {
+                bid,
+                ask,
+                ts_ms: now_ms(),
+            },
         );
     }
     Ok(())
@@ -297,7 +312,9 @@ pub async fn fetch_balances(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let resp = client
-        .get(format!("{rest_url}/api/v3/account?{query}&signature={signature}"))
+        .get(format!(
+            "{rest_url}/api/v3/account?{query}&signature={signature}"
+        ))
         .header("X-MBX-APIKEY", api_key)
         .send()
         .await
@@ -311,7 +328,9 @@ pub async fn fetch_balances(
 
     let mut map = std::collections::HashMap::new();
     for b in balances {
-        let Some(asset) = b.get("asset").and_then(Value::as_str) else { continue };
+        let Some(asset) = b.get("asset").and_then(Value::as_str) else {
+            continue;
+        };
         let parse = |key: &str| {
             b.get(key)
                 .and_then(Value::as_str)
@@ -337,5 +356,7 @@ pub async fn fetch_usdt_balance(rest_url: &str, api_key: &str, secret: &str) -> 
 pub type SharedOrderClient = Arc<Mutex<WsApiClient>>;
 
 pub async fn connect_order_client(ws_api_url: &str) -> Result<SharedOrderClient> {
-    Ok(Arc::new(Mutex::new(WsApiClient::connect(ws_api_url).await?)))
+    Ok(Arc::new(Mutex::new(
+        WsApiClient::connect(ws_api_url).await?,
+    )))
 }

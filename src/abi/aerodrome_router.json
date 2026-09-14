@@ -1,0 +1,111 @@
+[
+  {
+    "type": "function",
+    "name": "swapExactTokensForTokens",
+    "inputs": [
+      { "name": "amountIn", "type": "uint256" },
+      { "name": "amountOutMin", "type": "uint256" },
+      {
+        "name": "routes",
+        "type": "tuple[]",
+        "components": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "stable", "type": "bool" }
+        ]
+      },
+      { "name": "to", "type": "address" },
+      { "name": "deadline", "type": "uint256" }
+    ],
+    "outputs": [{ "name": "amounts", "type": "uint256[]" }],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "swapExactETHForTokens",
+    "inputs": [
+      { "name": "amountOutMin", "type": "uint256" },
+      {
+        "name": "routes",
+        "type": "tuple[]",
+        "components": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "stable", "type": "bool" }
+        ]
+      },
+      { "name": "to", "type": "address" },
+      { "name": "deadline", "type": "uint256" }
+    ],
+    "outputs": [{ "name": "amounts", "type": "uint256[]" }],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "swapExactTokensForETH",
+    "inputs": [
+      { "name": "amountIn", "type": "uint256" },
+      { "name": "amountOutMin", "type": "uint256" },
+      {
+        "name": "routes",
+        "type": "tuple[]",
+        "components": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "stable", "type": "bool" }
+        ]
+      },
+      { "name": "to", "type": "address" },
+      { "name": "deadline", "type": "uint256" }
+    ],
+    "outputs": [{ "name": "amounts", "type": "uint256[]" }],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "getAmountsOut",
+    "inputs": [
+      { "name": "amountIn", "type": "uint256" },
+      {
+        "name": "routes",
+        "type": "tuple[]",
+        "components": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "stable", "type": "bool" }
+        ]
+      }
+    ],
+    "outputs": [{ "name": "amounts", "type": "uint256[]" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "getAmountsIn",
+    "inputs": [
+      { "name": "amountOut", "type": "uint256" },
+      {
+        "name": "routes",
+        "type": "tuple[]",
+        "components": [
+          { "name": "from", "type": "address" },
+          { "name": "to", "type": "address" },
+          { "name": "stable", "type": "bool" }
+        ]
+      }
+    ],
+    "outputs": [{ "name": "amounts", "type": "uint256[]" }],
+    "stateMutability": "view"
+  },
+  {
+    "type": "event",
+    "name": "PoolCreated",
+    "inputs": [
+      { "name": "token0", "type": "address", "indexed": true },
+      { "name": "token1", "type": "address", "indexed": true },
+      { "name": "pool", "type": "address", "indexed": false },
+      { "name": "stable", "type": "bool", "indexed": false }
+    ],
+    "anonymous": false
+  }
+]

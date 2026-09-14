@@ -382,6 +382,7 @@ fn status_payload(runtime: &DashboardState) -> StatusPayload {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn require_action_auth(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), Response> {
     require_auth(headers, state)?;
     let origin = headers
@@ -413,6 +414,7 @@ fn action_error(status: StatusCode, message: &'static str) -> Response {
     )
 }
 
+#[allow(clippy::result_large_err)]
 fn require_auth(headers: &HeaderMap, state: &AppState) -> std::result::Result<(), Response> {
     if credentials_match(headers, &state.dashboard) {
         Ok(())

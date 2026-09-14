@@ -11,7 +11,10 @@
 //! JANGAN expose ke internet publik tanpa reverse proxy TLS + token kuat.
 
 use axum::{
-    extract::State,
+    extract::{
+        ws::{Message, WebSocket, WebSocketUpgrade},
+        State,
+    },
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json},
     routing::{get, post},
@@ -25,9 +28,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
-use crate::config::Mode;
+use crate::config::{Mode, StrategiesCfg};
 use crate::connectors::binance::SharedPrices;
-use crate::events::MonitorMsg;
+use crate::events::{MonitorMsg, WebWsMsg};
 use crate::metrics::SharedMetrics;
 use crate::pnl::SharedPnl;
 use crate::risk::manager::{HaltFlag, SharedPositions};
@@ -45,6 +48,7 @@ pub struct WebState {
     pub metrics: SharedMetrics,
     pub pnl: SharedPnl,
     pub prices: SharedPrices,
+    pub strategies: StrategiesCfg,
     pub pool: SqlitePool,
     pub token: Option<String>,
     pub tx_shutdown: watch::Sender<bool>,
@@ -154,7 +158,165 @@ async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
             "e2e_p95": snap.e2e_p95,
             "e2e_p99": snap.e2e_p99,
         }
-    })).into_response()
+    }))
+    .into_response()
+}
+
+fn strategy_statuses(strategies: &StrategiesCfg) -> Vec<(&'static str, bool)> {
+    vec![
+        ("sniper", strategies.sniper.enabled),
+        ("copy_onchain", strategies.copy_onchain.enabled),
+        ("grid_dca", strategies.grid_dca.enabled),
+        ("arbitrage", strategies.arbitrage.enabled),
+        ("yield_farming", strategies.yield_farming.enabled),
+        ("perps", strategies.perps.enabled),
+    ]
+}
+
+async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+
+    let strategies = &st.strategies;
+    let sniper = &strategies.sniper;
+    let copy_onchain = &strategies.copy_onchain;
+    let grid_dca = &strategies.grid_dca;
+    let arbitrage = &strategies.arbitrage;
+    let yield_farming = &strategies.yield_farming;
+    let perps = &strategies.perps;
+
+    Json(json!({"strategies": [
+        {
+            "name": "sniper",
+            "enabled": sniper.enabled,
+            "configured": !sniper.dex_factories.is_empty(),
+            "configured_factories": sniper.dex_factories.len(),
+            "max_buy_eth": sniper.max_buy_eth.to_string(),
+            "min_liquidity_eth": sniper.min_liquidity_eth.to_string(),
+        },
+        {
+            "name": "copy_onchain",
+            "enabled": copy_onchain.enabled,
+            "configured": !copy_onchain.target_wallets.is_empty(),
+            "configured_wallets": copy_onchain.target_wallets.len(),
+            "enabled_wallets": copy_onchain.target_wallets.iter().filter(|wallet| wallet.enabled).count(),
+            "slippage_bps": copy_onchain.slippage_bps,
+        },
+        {
+            "name": "grid_dca",
+            "enabled": grid_dca.enabled,
+            "configured": !grid_dca.grids.is_empty() || !grid_dca.dca_plans.is_empty(),
+            "configured_grids": grid_dca.grids.len(),
+            "configured_dca_plans": grid_dca.dca_plans.len(),
+        },
+        {
+            "name": "arbitrage",
+            "enabled": arbitrage.enabled,
+            "configured": !arbitrage.monitored_pools.is_empty(),
+            "configured_pools": arbitrage.monitored_pools.len(),
+            "max_gas_gwei": arbitrage.max_gas_gwei,
+            "min_profit_eth": arbitrage.min_profit_eth.to_string(),
+        },
+        {
+            "name": "yield_farming",
+            "enabled": yield_farming.enabled,
+            "configured": !yield_farming.positions.is_empty(),
+            "configured_positions": yield_farming.positions.len(),
+            "auto_compound_positions": yield_farming.positions.iter().filter(|position| position.auto_compound).count(),
+            "auto_compound_interval_hours": yield_farming.auto_compound_interval_hours,
+        },
+        {
+            "name": "perps",
+            "enabled": perps.enabled,
+            "configured": !perps.positions.is_empty(),
+            "configured_positions": perps.positions.len(),
+            "max_leverage": perps.max_leverage,
+        },
+    ]}))
+    .into_response()
+}
+
+type PositionRow = (String, String, String, String, f64, f64, i64, Option<f64>);
+
+async fn api_positions(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+
+    let rows: Vec<PositionRow> = sqlx::query_as(
+        "SELECT id, strategy, pair, side, entry_price, size, opened_at, pnl
+         FROM positions WHERE closed_at IS NULL ORDER BY opened_at DESC",
+    )
+    .fetch_all(&st.pool)
+    .await
+    .unwrap_or_default();
+
+    let positions: Vec<Value> = rows
+        .into_iter()
+        .map(
+            |(id, strategy, pair, side, entry_price, size, opened_at, pnl)| {
+                json!({
+                    "id": id,
+                    "strategy": strategy,
+                    "pair": pair,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "size": size,
+                    "opened_at": opened_at,
+                    "pnl": pnl,
+                })
+            },
+        )
+        .collect();
+    Json(json!({"positions": positions})).into_response()
+}
+
+async fn send_strategy_statuses(socket: &mut WebSocket, strategies: &StrategiesCfg) -> bool {
+    for (strategy, enabled) in strategy_statuses(strategies) {
+        let payload = match serde_json::to_string(&WebWsMsg::Status {
+            strategy: strategy.to_owned(),
+            enabled,
+            pnl: Decimal::ZERO,
+        }) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(error = %error, "gagal serialisasi status WebSocket");
+                return false;
+            }
+        };
+        if socket.send(Message::Text(payload.into())).await.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+async fn ws_status(socket: WebSocket, st: Shared) {
+    let mut socket = socket;
+    if !send_strategy_statuses(&mut socket, &st.strategies).await {
+        return;
+    }
+
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+    heartbeat.tick().await;
+    loop {
+        heartbeat.tick().await;
+        if !send_strategy_statuses(&mut socket, &st.strategies).await {
+            return;
+        }
+    }
+}
+
+async fn ws(
+    State(st): State<Shared>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    upgrade.on_upgrade(move |socket| ws_status(socket, st))
 }
 
 async fn api_trades(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
@@ -187,7 +349,9 @@ async fn api_stop(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResp
     tracing::warn!("STOP via dashboard web");
     let _ = st
         .tx_monitor
-        .send(MonitorMsg::Critical("STOP via dashboard web — bot shutdown".into()))
+        .send(MonitorMsg::Critical(
+            "STOP via dashboard web — bot shutdown".into(),
+        ))
         .await;
     let _ = st.tx_shutdown.send(true);
     Json(json!({"ok": true, "action": "stop"})).into_response()
@@ -213,9 +377,12 @@ pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Re
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/api/status", get(api_status))
+        .route("/api/strategies", get(api_strategies))
+        .route("/api/positions", get(api_positions))
         .route("/api/trades", get(api_trades))
         .route("/api/stop", post(api_stop))
         .route("/api/resume", post(api_resume))
+        .route("/ws", get(ws))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(&bind).await {

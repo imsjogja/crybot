@@ -6,7 +6,9 @@
 //! - public_stream_bookticker : tanpa key, selalu bisa dijalankan.
 //! - testnet_account_access   : butuh FOLLOWER_API_KEY/SECRET testnet di env.
 
-use crypto_copy_bot::connectors::binance::{fetch_usdt_balance, new_shared_prices, run_market_data};
+use crypto_copy_bot::connectors::binance::{
+    fetch_usdt_balance, new_shared_prices, run_market_data,
+};
 use tokio::sync::watch;
 
 /// Verifikasi jalur market data end-to-end: connect -> subscribe -> harga masuk.

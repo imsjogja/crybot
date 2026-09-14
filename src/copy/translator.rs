@@ -133,6 +133,7 @@ impl CopyTranslator {
             deviation_pct: deviation.round_dp(4),
             detect_latency_ms: fill.received_ts_ms - fill.master_ts_ms,
             ts_ms: now_ms(),
+            strategy: crate::events::StrategySource::CopyTrade,
         })
     }
 }
@@ -184,7 +185,7 @@ pub async fn run_translator(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connectors::binance::{new_shared_prices};
+    use crate::connectors::binance::new_shared_prices;
     use crate::events::{BookTicker, Side};
     use std::str::FromStr;
 
@@ -234,7 +235,12 @@ mod tests {
         prices
     }
 
-    fn translator(prices: SharedPrices, sizing: SizingModel, master_eq: &str, follower_eq: &str) -> CopyTranslator {
+    fn translator(
+        prices: SharedPrices,
+        sizing: SizingModel,
+        master_eq: &str,
+        follower_eq: &str,
+    ) -> CopyTranslator {
         CopyTranslator::new(cfg(sizing), prices, dec(master_eq), dec(follower_eq))
     }
 

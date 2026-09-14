@@ -66,3 +66,75 @@ reconcile:
   interval_min: 60
   # Drift di atas ini (%) -> alert kritis
   tolerance_pct: "1"
+
+# ============================================================================
+# BASE NETWORK
+# ============================================================================
+base:
+  # WebSocket endpoint — Flashblocks via Coinbase L2 feed (wss://...)
+  ws_url: "wss://base-flashblocks.coinbase.com/v1/ws/base"
+  # HTTP endpoint untuk RPC calls (public or paid RPC)
+  http_url: "https://mainnet.base.org"
+  # Flashblock pre-confirmation subscriptions (200ms latency)
+  flashblocks: true
+  # MEV-protected RPC (opsional — kosongkan untuk public RPC)
+  mev_rpc_url: null
+  # Nama env var berisi private key (BUKAN key-nya langsung!)
+  private_key_env: BASE_PRIVATE_KEY
+  # Alamat kontrak default sudah di-source code (BaseAddresses::default())
+
+# ============================================================================
+# STRATEGI BASE NETWORK — semua default enabled: false (aman)
+# ============================================================================
+strategies:
+  # 1. Token Sniping (Gems Hunting) — monitor PoolCreated, auto-buy token baru
+  sniper:
+    enabled: false
+    max_buy_eth: "0.05"
+    min_liquidity_eth: "1.0"
+    auto_tp_pct: "50"
+    auto_sl_pct: "20"
+    safety:
+      check_honeypot: true
+      check_ownership_renounced: true
+      check_lp_locked: false
+      check_holder_distribution: true
+      max_holder_pct: "5"
+
+  # 2. Copy Trading On-Chain — track wallet target, copy swap on-chain
+  copy_onchain:
+    enabled: false
+    slippage_bps: 300
+    sizing: fixed_ratio
+    copy_ratio: "0.1"
+    min_tx_eth: "0.01"
+    max_tx_eth: "1.0"
+    target_wallets: []
+
+  # 3. Grid Trading & DCA — grid orders + dollar cost averaging
+  grid_dca:
+    enabled: false
+    grids: []
+    dca_plans: []
+
+  # 4. DEX Arbitrage — selisih harga antar DEX
+  arbitrage:
+    enabled: false
+    min_profit_eth: "0.001"
+    max_gas_gwei: 5
+    monitored_pools: []
+
+  # 5. LP / Yield Farming — liquidity provision + auto-compound
+  yield_farming:
+    enabled: false
+    auto_compound_interval_hours: 6
+    min_fee_threshold_eth: "0.001"
+    positions: []
+
+  # 6. Perps Trading — kontrak berjangka terdesentralisasi (GMX V2)
+  perps:
+    enabled: false
+    max_leverage: 10
+    exchange_router: null
+    reader: null
+    positions: []

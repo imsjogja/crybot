@@ -1,0 +1,61 @@
+[
+  {
+    "type": "function",
+    "name": "exactInputSingle",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "components": [
+          { "name": "tokenIn", "type": "address" },
+          { "name": "tokenOut", "type": "address" },
+          { "name": "fee", "type": "uint24" },
+          { "name": "recipient", "type": "address" },
+          { "name": "amountIn", "type": "uint256" },
+          { "name": "amountOutMinimum", "type": "uint256" },
+          { "name": "sqrtPriceLimitX96", "type": "uint160" }
+        ]
+      }
+    ],
+    "outputs": [{ "name": "amountOut", "type": "uint256" }],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "exactInput",
+    "inputs": [
+      {
+        "name": "params",
+        "type": "tuple",
+        "components": [
+          { "name": "path", "type": "bytes" },
+          { "name": "recipient", "type": "address" },
+          { "name": "amountIn", "type": "uint256" },
+          { "name": "amountOutMinimum", "type": "uint256" }
+        ]
+      }
+    ],
+    "outputs": [{ "name": "amountOut", "type": "uint256" }],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "function",
+    "name": "multicall",
+    "inputs": [{ "name": "data", "type": "bytes[]" }],
+    "outputs": [{ "name": "results", "type": "bytes[]" }],
+    "stateMutability": "payable"
+  },
+  {
+    "type": "event",
+    "name": "PoolCreated",
+    "inputs": [
+      { "name": "token0", "type": "address", "indexed": true },
+      { "name": "token1", "type": "address", "indexed": true },
+      { "name": "fee", "type": "uint24", "indexed": true },
+      { "name": "tickLower", "type": "int24", "indexed": true },
+      { "name": "tickUpper", "type": "int24", "indexed": false },
+      { "name": "pool", "type": "address", "indexed": false }
+    ],
+    "anonymous": false
+  }
+]
