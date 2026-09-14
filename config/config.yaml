@@ -6,6 +6,10 @@
 # live    : order riil ke mainnet (WAJIB armed=true secara sadar)
 mode: paper
 
+# Pasar akun follower: spot (default) | futures
+# Futures mengaktifkan: posisi short, leverage, guard SL otomatis, flatten.
+market: futures
+
 master:
   # Nama env var berisi API key READ-ONLY akun master (bukan key-nya langsung!)
   api_key_env: MASTER_API_KEY
@@ -52,6 +56,32 @@ monitor:
 
 store:
   sqlite_path: data/events.db
+
+# Guard futures (adopsi invarian flavebot: posisi tak pernah tanpa SL)
+guard:
+  # Pasang STOP_MARKET otomatis setiap posisi terbuka (wajib true di futures)
+  sl_enabled: true
+  # Jarak SL default dari harga entry (%) — bisa dioverride dinamis dari UI
+  default_sl_pct: "2"
+  # Bila gagal memasang SL -> posisi langsung ditutup market (fail-safe)
+  close_if_sl_fails: true
+  # /stop juga menutup semua posisi terbuka (flatten). Default false = stop entry saja.
+  flatten_on_stop: false
+  # Cap total exposure (notional USDT) semua posisi -> alert. 0 = nonaktif.
+  max_exposure_usdt: "0"
+  # Leverage futures per symbol (diset saat startup). UI bisa override (aktif setelah restart).
+  leverage: 3
+
+# Screener master publik (leaderboard Binance) — skor kredibilitas 0–100
+screener:
+  enabled: true
+  # Interval polling leaderboard (menit)
+  interval_min: 240
+  # Skor minimum kandidat yang diangkat sebagai "layak"
+  min_score: 60
+  # Mode B (EKSERIMENTAL): replikasi posisi kandidat publik teratas.
+  # Default false — gunakan Mode A (copy native Binance + crybot sebagai pengaman).
+  replicate_public: false
 
 # Dashboard web — UI visual untuk pengguna awam
 web:
