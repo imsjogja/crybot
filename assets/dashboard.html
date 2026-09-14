@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>crybot — Dashboard</title>
+<style>
+  :root {
+    --bg: #0d1117; --card: #161b22; --border: #30363d;
+    --text: #e6edf3; --muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --yellow: #d29922; --blue: #58a6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, 'Segoe UI', Roboto, sans-serif; padding: 16px; max-width: 1100px; margin: 0 auto; }
+  h1 { font-size: 20px; }
+  .header { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .header .spacer { flex: 1; }
+  .badge { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 700; letter-spacing: .5px; }
+  .badge.ok { background: rgba(63,185,80,.15); color: var(--green); border: 1px solid var(--green); }
+  .badge.warn { background: rgba(210,153,34,.15); color: var(--yellow); border: 1px solid var(--yellow); }
+  .badge.bad { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid var(--red); }
+  .badge.info { background: rgba(88,166,255,.15); color: var(--blue); border: 1px solid var(--blue); }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 10px; }
+  .big { font-size: 26px; font-weight: 700; }
+  .pos { color: var(--green); } .neg { color: var(--red); } .muted { color: var(--muted); }
+  .row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; border-bottom: 1px dashed var(--border); }
+  .row:last-child { border-bottom: none; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  .pill { padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 700; }
+  .pill.buy { background: rgba(63,185,80,.2); color: var(--green); }
+  .pill.sell { background: rgba(248,81,73,.2); color: var(--red); }
+  .pill.err { background: rgba(210,153,34,.2); color: var(--yellow); }
+  .btn { padding: 10px 18px; border-radius: 8px; border: 1px solid var(--border); background: var(--card); color: var(--text); font-size: 14px; font-weight: 600; cursor: pointer; }
+  .btn:hover { border-color: var(--blue); }
+  .btn.danger { border-color: var(--red); color: var(--red); }
+  .btn.danger:hover { background: rgba(248,81,73,.15); }
+  .btn.go { border-color: var(--green); color: var(--green); }
+  .btn.go:hover { background: rgba(63,185,80,.15); }
+  .controls { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+  .banner { background: rgba(210,153,34,.12); border: 1px solid var(--yellow); color: var(--yellow); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; font-size: 13px; display: none; }
+  .section { margin-bottom: 16px; }
+  .section h2 { font-size: 14px; margin-bottom: 8px; }
+  .scroll { max-height: 320px; overflow-y: auto; }
+  #tokenBox { display:none; background: var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px; }
+  #tokenBox input { width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); margin:8px 0; font-size:14px; }
+  .footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 20px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>🤖 crybot</h1>
+  <span id="stBadge" class="badge info">MEMUAT…</span>
+  <span id="modeBadge" class="badge info">—</span>
+  <span id="haltBadge" class="badge ok" style="display:none">HALT</span>
+  <div class="spacer"></div>
+  <span class="muted" id="uptime">uptime —</span>
+</div>
+
+<div class="banner" id="demoBanner">⚠️ <b>Mode demo</b> — bot tidak terjangkau dari halaman ini. Data di bawah hanya contoh tampilan.</div>
+
+<div id="tokenBox">
+  <b>🔐 Dashboard terproteksi token</b>
+  <div class="muted" style="font-size:13px">Masukkan DASHBOARD_TOKEN dari file .env server.</div>
+  <input id="tokenInput" type="password" placeholder="tempel token di sini">
+  <button class="btn" onclick="saveToken()">Simpan &amp; Muat Ulang</button>
+</div>
+
+<div class="grid">
+  <div class="card">
+    <h2>💰 Ekuitas &amp; PnL</h2>
+    <div class="big" id="equity">—</div>
+    <div class="row"><span class="muted">PnL hari ini</span><span id="pnlToday">—</span></div>
+    <div class="row"><span class="muted">PnL total (realized)</span><span id="pnlTotal">—</span></div>
+    <div class="row"><span class="muted">Belum terealisasi</span><span id="pnlUnreal">—</span></div>
+    <div class="row"><span class="muted">Win rate</span><span id="winRate">—</span></div>
+  </div>
+  <div class="card">
+    <h2>⚡ Latensi (target: deteksi &lt;20 ms · e2e &lt;75 ms)</h2>
+    <div class="row"><span class="muted">Deteksi p50 / p95 / p99</span><span id="latDet">—</span></div>
+    <div class="row"><span class="muted">E2E p50 / p95 / p99</span><span id="latE2e">—</span></div>
+    <div class="row"><span class="muted">Status harga pasar</span><span id="priceAge">—</span></div>
+  </div>
+  <div class="card">
+    <h2>📡 Aktivitas Copy</h2>
+    <div class="row"><span class="muted">Fill master terdeteksi</span><span id="mFills">—</span></div>
+    <div class="row"><span class="muted">Sinyal lolos / skip</span><span id="mSig">—</span></div>
+    <div class="row"><span class="muted">Skip rate</span><span id="mSkip">—</span></div>
+    <div class="row"><span class="muted">Order → fill follower</span><span id="mOrd">—</span></div>
+    <div class="row"><span class="muted">Error eksekusi</span><span id="mErr">—</span></div>
+  </div>
+</div>
+
+<div class="section card">
+  <h2>📊 Posisi Terbuka</h2>
+  <div id="posTable"><span class="muted">Tidak ada posisi terbuka.</span></div>
+</div>
+
+<div class="controls">
+  <button class="btn go" onclick="doResume()">▶️ Resume (clear halt)</button>
+  <button class="btn danger" onclick="doStop()">🛑 Stop Bot</button>
+  <button class="btn" onclick="loadAll()">🔄 Muat Ulang</button>
+</div>
+
+<div class="section card">
+  <h2>🧾 Riwayat Aktivitas Terakhir</h2>
+  <div class="scroll" id="tradeTable"><span class="muted">Belum ada aktivitas.</span></div>
+</div>
+
+<div class="footer">crybot dashboard · auto-refresh 5 detik · semua keputusan tercatat di event log</div>
+
+<script>
+let demo = false;
+const $ = id => document.getElementById(id);
+const fmt = (n, d=2) => Number(n).toLocaleString('id-ID', {minimumFractionDigits:d, maximumFractionDigits:d});
+const fmtMs = v => v === null || v === undefined ? '–' : v + ' ms';
+const pnlCls = v => v > 0 ? 'pos' : v < 0 ? 'neg' : 'muted';
+const pnlTxt = v => (v > 0 ? '+' : '') + fmt(v) + ' USDT';
+
+function token() { return localStorage.getItem('crybot_token') || ''; }
+function saveToken() { localStorage.setItem('crybot_token', $('tokenInput').value.trim()); location.reload(); }
+async function api(path, method='GET') {
+  const r = await fetch(path, { method, headers: token() ? { 'Authorization': 'Bearer ' + token() } : {} });
+  if (r.status === 401) { $('tokenBox').style.display = 'block'; throw new Error('unauthorized'); }
+  if (!r.ok) throw new Error('http ' + r.status);
+  return r.json();
+}
+
+const DEMO = {
+  mode: 'Paper', armed: false, halt: false, uptime_sec: 9240, pairs: ['BTCUSDT','ETHUSDT'],
+  equity_usdt: 1012.50, start_equity_usdt: 1000, pnl_today_usdt: 8.25, pnl_total_usdt: 12.50,
+  unrealized_usdt: 4.10, closed_trades: 4, wins: 3, win_rate_pct: 75,
+  positions: [{symbol:'BTCUSDT', qty:'0.0100', avg_cost:'99500', mid:'99910', value_usdt:999.1, unrealized_usdt:4.1}],
+  prices_age: [{symbol:'BTCUSDT', age_ms: 120}, {symbol:'ETHUSDT', age_ms: 95}],
+  metrics: { master_fills: 57, signals: 41, skips: 16, skip_rate_pct: 28.1, orders: 41, follower_fills: 41, exec_errors: 0,
+             detect_p50: 4, detect_p95: 9, detect_p99: 18, e2e_p50: 31, e2e_p95: 58, e2e_p99: 72 }
+};
+const DEMO_TRADES = { trades: [
+  { ts_ms: Date.now()-3600000, kind:'follower_fill', data:{symbol:'BTCUSDT', side:'Buy', qty:'0.0100', price:'99500', paper:true, e2e_latency_ms:34} },
+  { ts_ms: Date.now()-7200000, kind:'follower_fill', data:{symbol:'ETHUSDT', side:'Sell', qty:'0.50', price:'3410', paper:true, e2e_latency_ms:28} },
+]};
+
+function renderStatus(s) {
+  $('modeBadge').textContent = s.mode.toUpperCase();
+  $('modeBadge').className = 'badge ' + (s.mode === 'Live' ? 'bad' : s.mode === 'Testnet' ? 'warn' : 'info');
+  $('stBadge').textContent = s.armed ? 'EKSEKUSI AKTIF' : 'AMAN (armed off)';
+  $('stBadge').className = 'badge ' + (s.armed ? 'ok' : 'warn');
+  $('haltBadge').style.display = s.halt ? '' : 'none';
+  $('haltBadge').className = 'badge bad';
+  $('haltBadge').textContent = '🚨 HALT';
+  const h = Math.floor(s.uptime_sec/3600), m = Math.floor((s.uptime_sec%3600)/60);
+  $('uptime').textContent = `uptime ${h}j ${m}m`;
+
+  $('equity').textContent = fmt(s.equity_usdt) + ' USDT';
+  $('pnlToday').innerHTML = `<span class="${pnlCls(s.pnl_today_usdt)}">${pnlTxt(s.pnl_today_usdt)}</span>`;
+  $('pnlTotal').innerHTML = `<span class="${pnlCls(s.pnl_total_usdt)}">${pnlTxt(s.pnl_total_usdt)}</span>`;
+  $('pnlUnreal').innerHTML = `<span class="${pnlCls(s.unrealized_usdt)}">${pnlTxt(s.unrealized_usdt)}</span>`;
+  $('winRate').textContent = s.closed_trades ? `${s.wins}/${s.closed_trades} (${fmt(s.win_rate_pct,0)}%)` : 'belum ada trade tertutup';
+
+  const M = s.metrics;
+  $('latDet').textContent = `${fmtMs(M.detect_p50)} / ${fmtMs(M.detect_p95)} / ${fmtMs(M.detect_p99)}`;
+  $('latE2e').textContent = `${fmtMs(M.e2e_p50)} / ${fmtMs(M.e2e_p95)} / ${fmtMs(M.e2e_p99)}`;
+  const stale = (s.prices_age||[]).some(p => p.age_ms > 5000);
+  $('priceAge').innerHTML = stale ? '<span class="neg">BASI (>5 dtk)</span>' : '<span class="pos">segar</span>';
+  $('mFills').textContent = M.master_fills;
+  $('mSig').textContent = `${M.signals} / ${M.skips}`;
+  $('mSkip').textContent = fmt(M.skip_rate_pct,1) + '%';
+  $('mOrd').textContent = `${M.orders} → ${M.follower_fills}`;
+  $('mErr').innerHTML = M.exec_errors ? `<span class="neg">${M.exec_errors}</span>` : '0';
+
+  if (s.positions && s.positions.length) {
+    $('posTable').innerHTML = '<table><tr><th>Pair</th><th>Qty</th><th>Harga rata²</th><th>Harga kini</th><th>Nilai</th><th>Untung/Rugi</th></tr>' +
+      s.positions.map(p => `<tr><td><b>${p.symbol}</b></td><td>${p.qty}</td><td>${fmt(p.avg_cost,2)}</td><td>${fmt(p.mid,2)}</td><td>${fmt(p.value_usdt)} USDT</td><td class="${pnlCls(p.unrealized_usdt)}">${pnlTxt(p.unrealized_usdt)}</td></tr>`).join('') + '</table>';
+  } else {
+    $('posTable').innerHTML = '<span class="muted">Tidak ada posisi terbuka.</span>';
+  }
+}
+
+function renderTrades(t) {
+  if (!t.trades || !t.trades.length) { $('tradeTable').innerHTML = '<span class="muted">Belum ada aktivitas.</span>'; return; }
+  $('tradeTable').innerHTML = '<table><tr><th>Waktu</th><th>Jenis</th><th>Pair</th><th>Qty</th><th>Harga</th><th>E2E</th></tr>' +
+    t.trades.map(x => {
+      const d = new Date(x.ts_ms);
+      const waktu = d.toLocaleString('id-ID', {day:'2-digit', month:'short', hour:'2-digit', minute:'2-digit'});
+      if (x.kind !== 'follower_fill') {
+        return `<tr><td>${waktu}</td><td><span class="pill err">${x.kind}</span></td><td colspan="4" class="muted">${String(x.data).slice(0,90)}</td></tr>`;
+      }
+      const f = x.data;
+      const side = String(f.side);
+      return `<tr><td>${waktu}</td><td><span class="pill ${side==='Buy'?'buy':'sell'}">${side.toUpperCase()}${f.paper?' (paper)':''}</span></td><td><b>${f.symbol}</b></td><td>${f.qty}</td><td>${fmt(f.price,2)}</td><td>${fmtMs(f.e2e_latency_ms)}</td></tr>`;
+    }).join('') + '</table>';
+}
+
+async function loadAll() {
+  if (demo) { renderStatus(DEMO); renderTrades(DEMO_TRADES); return; }
+  try {
+    const [s, t] = await Promise.all([api('/api/status'), api('/api/trades')]);
+    renderStatus(s); renderTrades(t);
+  } catch (e) {
+    if (e.message !== 'unauthorized' && !demo) {
+      demo = true;
+      $('demoBanner').style.display = 'block';
+      renderStatus(DEMO); renderTrades(DEMO_TRADES);
+    }
+  }
+}
+
+async function doStop() {
+  if (demo) { alert('Mode demo — tidak ada bot yang dihentikan.'); return; }
+  if (!confirm('Yakin STOP bot? Semua order baru berhenti. Bot harus dinyalakan lagi manual di server.')) return;
+  try { await api('/api/stop', 'POST'); $('stBadge').textContent = 'DIMATIKAN'; $('stBadge').className = 'badge bad'; } catch(e) { alert('Gagal: ' + e.message); }
+}
+async function doResume() {
+  if (demo) { alert('Mode demo — tidak ada halt yang di-clear.'); return; }
+  if (!confirm('Clear halt? Lakukan HANYA setelah mismatch rekonsiliasi ditinjau.')) return;
+  try { await api('/api/resume', 'POST'); loadAll(); } catch(e) { alert('Gagal: ' + e.message); }
+}
+
+loadAll();
+setInterval(loadAll, 5000);
+</script>
+</body>
+</html>
