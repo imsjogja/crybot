@@ -61,10 +61,17 @@ Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chron
 
 ## Dashboard operator
 
-Dashboard menyediakan status yang sama dengan `/status` serta aksi `/resume`
-dan `/stop`. Akses memakai HTTP Basic Auth dari `DASHBOARD_USERNAME` dan
-`DASHBOARD_PASSWORD`; endpoint aksi juga hanya menerima origin yang sama
-dengan `monitor.dashboard_allowed_origin`.
+Dashboard menyediakan status yang sama dengan `/status`, aksi `/resume` dan
+`/stop`, serta **Paper demo**. Paper demo hanya terlihat dan hanya dapat
+dijalankan saat `mode: paper`, `risk.armed: true`, dan halt tidak aktif. Aksi
+ini mengirim fill master sintetis pada harga `bookTicker` terkini melalui
+pipeline normal (translator → risk → paper execution), sehingga tidak membuat
+order atau transfer ke Binance. Jalankan simulated **BUY** sebelum **SELL**
+karena spot paper tidak mendukung short.
+
+Akses memakai HTTP Basic Auth dari `DASHBOARD_USERNAME` dan
+`DASHBOARD_PASSWORD`; seluruh endpoint aksi juga hanya menerima origin yang
+sama dengan `monitor.dashboard_allowed_origin`.
 
 Untuk Docker, salin `config/production.yaml.example` menjadi
 `config/production.yaml`, set `CRYBOT_CONFIG_PATH=config/production.yaml` dan

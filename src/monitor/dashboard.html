@@ -17,7 +17,7 @@
     .section { margin-top:14px; } .pairs { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .pair { background:#202b49; color:#cbd8fa; border-radius:7px; padding:4px 8px; font-size:.84rem; }
     table { width:100%; border-collapse:collapse; } th,td { padding:10px 0; border-bottom:1px solid var(--line); text-align:left; } th { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; } td:last-child,th:last-child{text-align:right;}
     .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; } .metric { border:1px solid var(--line); background:#111930; border-radius:10px; padding:12px; } .metric b { display:block; font-size:1.05rem; margin-top:4px; }
-    .actions { display:flex; gap:12px; flex-wrap:wrap; align-items:center; } button { border:0; border-radius:9px; padding:10px 14px; color:#061323; background:var(--accent); font:inherit; font-weight:750; cursor:pointer; } button:hover{filter:brightness(1.08)} button:disabled{opacity:.45;cursor:not-allowed} button.danger{color:#fff;background:var(--bad)} .notice{min-height:24px;margin-top:12px;color:var(--muted)} .notice.error{color:#ffabb2}.notice.success{color:#86f2c8}
+    .actions { display:flex; gap:12px; flex-wrap:wrap; align-items:center; } button,select { border:0; border-radius:9px; padding:10px 14px; font:inherit; } button { color:#061323; background:var(--accent); font-weight:750; cursor:pointer; } button:hover{filter:brightness(1.08)} button:disabled{opacity:.45;cursor:not-allowed} button.danger{color:#fff;background:var(--bad)} button.secondary{color:#dbe7ff;background:#263b68} select{color:var(--text);background:#111930;border:1px solid var(--line)} .notice{min-height:24px;margin-top:12px;color:var(--muted)} .notice.error{color:#ffabb2}.notice.success{color:#86f2c8}
     .warning { border-left:3px solid var(--warn); padding-left:12px; color:#e7d9a8; font-size:.9rem; }
     @media(max-width:760px){header{display:block}.live{margin-top:10px}.grid,.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.metrics{grid-template-columns:1fr}.card{padding:15px}} @media(max-width:430px){.grid,.grid.two{grid-template-columns:1fr}}
   </style>
@@ -48,6 +48,16 @@
       <div class="actions section"><button id="resume" type="button">Clear halt / Resume</button><button id="stop" class="danger" type="button">Stop bot</button></div>
       <div id="notice" class="notice" role="status"></div>
     </section>
+    <section id="demo-section" class="card section" hidden>
+      <h2>Paper demo — tanpa order Binance</h2>
+      <p class="warning">Membuat fill master sintetis memakai harga pasar saat ini, lalu melewati translator, risk manager, dan paper execution. Tidak ada order atau transfer yang dikirim ke Binance. Jalankan BUY lebih dulu; SELL hanya dapat menutup posisi simulasi yang sudah ada.</p>
+      <div class="actions section">
+        <select id="demo-symbol" aria-label="Pair demo"></select>
+        <button id="demo-buy" class="secondary" type="button">Simulate BUY</button>
+        <button id="demo-sell" class="secondary" type="button">Simulate SELL</button>
+      </div>
+      <div id="demo-notice" class="notice" role="status"></div>
+    </section>
   </main>
   <script>
     const $ = id => document.getElementById(id);
@@ -55,20 +65,31 @@
     const setNotice = (text, kind = "") => { const n = $("notice"); n.textContent = text; n.className = `notice ${kind}`; };
     function setTag(id, active, yes, no) { const el = $(id); el.textContent = active ? yes : no; el.className = `tag ${active ? "good" : "bad"}`; }
     function positionRow(position) { const row=document.createElement("tr"), symbol=document.createElement("td"), quantity=document.createElement("td"); symbol.textContent=position.symbol; quantity.textContent=position.quantity; row.append(symbol,quantity); return row; }
+    function setDemoPairs(pairs) {
+      const select=$("demo-symbol"), selected=select.value;
+      select.replaceChildren(...pairs.map(pair => { const option=document.createElement("option"); option.value=pair; option.textContent=pair; return option; }));
+      if (pairs.includes(selected)) select.value=selected;
+    }
     function render(data) {
       $("mode").textContent=data.mode; $("mode").className=`tag ${data.mode === "live" ? "bad" : data.mode === "testnet" ? "warn" : "good"}`;
       setTag("armed",data.armed,"ARMED","SAFE"); setTag("halted",data.halted,"HALTED","CLEAR");
-      $("position-count").textContent=data.positions.length; $("pairs").replaceChildren(...data.pairs.map(p => { const el=document.createElement("span"); el.className="pair"; el.textContent=p; return el; }));
+      $("position-count").textContent=data.positions.length; $("pairs").replaceChildren(...data.pairs.map(p => { const el=document.createElement("span"); el.className="pair"; el.textContent=p; return el; })); setDemoPairs(data.pairs);
       const positions=$("positions"); positions.replaceChildren();
       if (!data.positions.length) { const row=document.createElement("tr"), cell=document.createElement("td"); cell.colSpan=2; cell.textContent="Tidak ada posisi terbuka."; row.appendChild(cell); positions.appendChild(row); } else data.positions.forEach(p => positions.appendChild(positionRow(p)));
       const m=data.metrics; [["master-fills",m.master_fills],["orders",m.orders],["follower-fills",m.follower_fills],["signals",m.signals],["skips",m.skips],["errors",m.exec_errors]].forEach(([id,value]) => $(id).textContent=value);
       $("detect-latency").textContent=[m.detect_p50_ms,m.detect_p95_ms,m.detect_p99_ms].map(display).join(" / "); $("e2e-latency").textContent=[m.e2e_p50_ms,m.e2e_p95_ms,m.e2e_p99_ms].map(display).join(" / "); $("skip-rate").textContent=`${m.skip_rate_pct.toFixed(1)}%`;
       $("resume").disabled=!data.halted; $("updated").textContent=`Diperbarui ${new Date().toLocaleTimeString("id-ID")}`;
+      const demoAvailable=data.mode === "paper"; $("demo-section").hidden=!demoAvailable;
+      $("demo-buy").disabled=!demoAvailable || !data.armed || data.halted || !data.pairs.length;
+      $("demo-sell").disabled=!demoAvailable || !data.armed || data.halted || !data.pairs.length;
     }
     async function refresh() { try { const r=await fetch("/api/status",{cache:"no-store"}); if(!r.ok) throw new Error(`HTTP ${r.status}`); render(await r.json()); } catch(e) { setNotice(`Gagal memuat status: ${e.message}`,"error"); } }
-    async function action(path, confirmation) { if(!confirm(confirmation)) return; try { const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store"}); const body=await r.json(); if(!r.ok || !body.ok) throw new Error(body.message || `HTTP ${r.status}`); setNotice(body.message,"success"); await refresh(); } catch(e) { setNotice(`Aksi gagal: ${e.message}`,"error"); } }
+    async function action(path, confirmation, payload, noticeId="notice") { if(!confirm(confirmation)) return; try { const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},body:payload ? JSON.stringify(payload) : undefined,cache:"no-store"}); const text=await r.text(); let body; try { body=JSON.parse(text); } catch { body={message:text}; } if(!r.ok || !body.ok) throw new Error(body.message || `HTTP ${r.status}`); const n=$(noticeId); n.textContent=body.message; n.className="notice success"; await refresh(); } catch(e) { const n=$(noticeId); n.textContent=`Aksi gagal: ${e.message}`; n.className="notice error"; } }
     $("resume").addEventListener("click",()=>action("/api/actions/resume","Clear halt dan izinkan order baru? Pastikan mismatch rekonsiliasi sudah ditinjau."));
     $("stop").addEventListener("click",()=>action("/api/actions/stop","Stop bot sekarang? Proses dan dashboard akan berhenti secara graceful."));
+    function runDemo(side) { const symbol=$("demo-symbol").value; action("/api/actions/demo-fill",`Jalankan simulated ${side} ${symbol}? Tidak ada order Binance yang dibuat.`,{symbol,side},"demo-notice"); }
+    $("demo-buy").addEventListener("click",()=>runDemo("BUY"));
+    $("demo-sell").addEventListener("click",()=>runDemo("SELL"));
     refresh(); setInterval(refresh,5000);
   </script>
 </body>
