@@ -47,6 +47,8 @@ monitor:
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
   telegram_chat_id_env: TELEGRAM_CHAT_ID
   alert_on_fill: true
+  # Perintah interaktif /status /stop /resume (hanya dari TELEGRAM_CHAT_ID)
+  commands_enabled: true
 
 store:
   sqlite_path: data/events.db

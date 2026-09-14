@@ -5,6 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::events::MonitorMsg;
 
+#[derive(Clone)]
 pub struct TelegramAlerter {
     token: String,
     chat_id: String,
