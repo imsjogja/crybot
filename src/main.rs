@@ -19,6 +19,7 @@ use crypto_copy_bot::execution::engine::{run_execution, ExecutionEngine};
 use crypto_copy_bot::metrics::{self, new_shared_metrics};
 use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
 use crypto_copy_bot::monitor::telegram::{run_monitor, TelegramAlerter};
+use crypto_copy_bot::monitor::web::{run_dashboard, DashboardConfig, DashboardState};
 use crypto_copy_bot::reconcile;
 use crypto_copy_bot::risk::manager::{
     new_halt_flag, new_shared_positions, run_risk_manager, FillFeedback, RiskManager,
@@ -121,6 +122,11 @@ async fn main() -> Result<()> {
     let tg_token = std::env::var(&cfg.monitor.telegram_bot_token_env).unwrap_or_default();
     let tg_chat = std::env::var(&cfg.monitor.telegram_chat_id_env).unwrap_or_default();
     let tg = TelegramAlerter::new(tg_token.clone(), tg_chat.clone());
+    let static_info = StaticInfo {
+        mode: cfg.mode,
+        armed: cfg.risk.armed,
+        pairs: cfg.copy.symbol_allowlist.clone(),
+    };
 
     // --- Spawn tasks -------------------------------------------------------------
     let mut handles = Vec::new();
@@ -164,17 +170,36 @@ async fn main() -> Result<()> {
             tg_token,
             tg_chat,
             tg.clone(),
-            StaticInfo {
-                mode: cfg.mode,
-                armed: cfg.risk.armed,
-                pairs: cfg.copy.symbol_allowlist.clone(),
-            },
+            static_info.clone(),
             metrics.clone(),
             positions.clone(),
             halt.clone(),
             tx_monitor.clone(),
             tx_shutdown.clone(),
         )));
+    }
+    if cfg.monitor.dashboard_enabled {
+        let username = env_secret(&cfg.monitor.dashboard_username_env, true)?;
+        let password = env_secret(&cfg.monitor.dashboard_password_env, true)?;
+        let dashboard_cfg = DashboardConfig {
+            bind: cfg.monitor.dashboard_bind.clone(),
+            allowed_origin: cfg.monitor.dashboard_allowed_origin.clone(),
+            username,
+            password,
+        };
+        let dashboard_state = DashboardState {
+            info: static_info.clone(),
+            metrics: metrics.clone(),
+            positions: positions.clone(),
+            halt: halt.clone(),
+            tx_monitor: tx_monitor.clone(),
+            tx_shutdown: tx_shutdown.clone(),
+        };
+        handles.push(tokio::spawn(async move {
+            if let Err(error) = run_dashboard(dashboard_cfg, dashboard_state).await {
+                tracing::error!(%error, "dashboard berhenti");
+            }
+        }));
     }
     handles.push(tokio::spawn(run_store(rx_log, pool)));
     handles.push(tokio::spawn(reconcile::run_reconciler(

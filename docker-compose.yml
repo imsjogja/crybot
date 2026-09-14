@@ -7,12 +7,15 @@ services:
     build: .
     image: crybot:latest
     container_name: crybot
-    restart: unless-stopped
+    # Exit bersih dari aksi Stop tidak dihidupkan kembali; crash masih dicoba ulang.
+    restart: on-failure:5
     env_file: .env            # API keys & Telegram — JANGAN commit file ini
     volumes:
       - ./data:/app/data      # event log SQLite persisten
       - ./config:/app/config:ro
-    # Bot hanya butuh egress HTTPS/WSS — tidak ada port yang diekspos.
+    # Dashboard hanya dapat dijangkau reverse proxy host, bukan Internet langsung.
+    ports:
+      - "127.0.0.1:8080:8080"
     logging:
       driver: json-file
       options:

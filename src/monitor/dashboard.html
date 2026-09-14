@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Crybot Operator Dashboard</title>
+  <style>
+    :root { color-scheme:dark; --bg:#0b1020; --surface:#151d33; --line:#2a3658; --text:#edf2ff; --muted:#9eabc9; --good:#31c48d; --warn:#f6c453; --bad:#ff6b75; --accent:#72a1ff; }
+    * { box-sizing:border-box; } body { margin:0; font:15px/1.5 Inter,ui-sans-serif,system-ui,sans-serif; background:linear-gradient(145deg,#0b1020,#101a31); color:var(--text); }
+    main { max-width:1120px; margin:auto; padding:28px 20px 52px; } header { display:flex; justify-content:space-between; gap:16px; align-items:flex-start; margin-bottom:24px; }
+    h1 { font-size:clamp(1.5rem,3vw,2.2rem); margin:0; } h2 { font-size:1rem; margin:0 0 16px; } p { color:var(--muted); margin:5px 0 0; }
+    .live { display:flex; align-items:center; gap:8px; color:var(--muted); white-space:nowrap; } .dot { width:9px; height:9px; border-radius:50%; background:var(--good); box-shadow:0 0 12px var(--good); }
+    .grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; } .grid.two { grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:14px; }
+    .card { background:rgba(21,29,51,.91); border:1px solid var(--line); border-radius:14px; padding:18px; box-shadow:0 16px 36px rgba(0,0,0,.16); }
+    .label { display:block; color:var(--muted); font-size:.77rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; } .value { font-size:1.55rem; font-weight:750; margin-top:7px; }
+    .tag { display:inline-flex; padding:4px 9px; border-radius:999px; font-size:.82rem; font-weight:700; text-transform:uppercase; } .tag.good{background:#123e34;color:#86f2c8}.tag.warn{background:#4b3b13;color:#ffdd83}.tag.bad{background:#4c1e2a;color:#ffabb2}.tag.neutral{background:#263452;color:#c8d8ff}
+    .section { margin-top:14px; } .pairs { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; } .pair { background:#202b49; color:#cbd8fa; border-radius:7px; padding:4px 8px; font-size:.84rem; }
+    table { width:100%; border-collapse:collapse; } th,td { padding:10px 0; border-bottom:1px solid var(--line); text-align:left; } th { color:var(--muted); font-size:.78rem; text-transform:uppercase; letter-spacing:.05em; } td:last-child,th:last-child{text-align:right;}
+    .metrics { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; } .metric { border:1px solid var(--line); background:#111930; border-radius:10px; padding:12px; } .metric b { display:block; font-size:1.05rem; margin-top:4px; }
+    .actions { display:flex; gap:12px; flex-wrap:wrap; align-items:center; } button { border:0; border-radius:9px; padding:10px 14px; color:#061323; background:var(--accent); font:inherit; font-weight:750; cursor:pointer; } button:hover{filter:brightness(1.08)} button:disabled{opacity:.45;cursor:not-allowed} button.danger{color:#fff;background:var(--bad)} .notice{min-height:24px;margin-top:12px;color:var(--muted)} .notice.error{color:#ffabb2}.notice.success{color:#86f2c8}
+    .warning { border-left:3px solid var(--warn); padding-left:12px; color:#e7d9a8; font-size:.9rem; }
+    @media(max-width:760px){header{display:block}.live{margin-top:10px}.grid,.grid.two{grid-template-columns:repeat(2,minmax(0,1fr))}.metrics{grid-template-columns:1fr}.card{padding:15px}} @media(max-width:430px){.grid,.grid.two{grid-template-columns:1fr}}
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div><h1>Crybot Operator Dashboard</h1><p>Monitor runtime dan jalankan aksi kontrol yang setara dengan perintah Telegram.</p></div>
+      <div class="live"><span class="dot"></span><span id="updated">Memuat status…</span></div>
+    </header>
+    <section class="grid">
+      <article class="card"><span class="label">Mode</span><div class="value"><span id="mode" class="tag neutral">—</span></div></article>
+      <article class="card"><span class="label">Execution armed</span><div class="value" id="armed">—</div></article>
+      <article class="card"><span class="label">Halt flag</span><div class="value" id="halted">—</div></article>
+      <article class="card"><span class="label">Open positions</span><div class="value" id="position-count">—</div></article>
+    </section>
+    <section class="grid two">
+      <article class="card"><h2>Pair allowlist</h2><div id="pairs" class="pairs"></div></article>
+      <article class="card"><h2>Pipeline counters</h2><div class="metrics"><div class="metric"><span class="label">Master fills</span><b id="master-fills">—</b></div><div class="metric"><span class="label">Orders</span><b id="orders">—</b></div><div class="metric"><span class="label">Follower fills</span><b id="follower-fills">—</b></div><div class="metric"><span class="label">Signals</span><b id="signals">—</b></div><div class="metric"><span class="label">Skipped</span><b id="skips">—</b></div><div class="metric"><span class="label">Errors</span><b id="errors">—</b></div></div></article>
+    </section>
+    <section class="grid two section">
+      <article class="card"><h2>Open positions</h2><table><thead><tr><th>Symbol</th><th>Quantity</th></tr></thead><tbody id="positions"><tr><td colspan="2">Memuat…</td></tr></tbody></table></article>
+      <article class="card"><h2>Latency & skip rate</h2><div class="metrics"><div class="metric"><span class="label">Detect p50 / p95 / p99</span><b id="detect-latency">—</b></div><div class="metric"><span class="label">E2E p50 / p95 / p99</span><b id="e2e-latency">—</b></div><div class="metric"><span class="label">Skip rate</span><b id="skip-rate">—</b></div></div></article>
+    </section>
+    <section class="card section">
+      <h2>Operator actions</h2>
+      <p class="warning">Resume hanya boleh dilakukan setelah operator meninjau alert rekonsiliasi. Stop melakukan shutdown graceful; dashboard ikut berhenti karena berjalan di proses bot yang sama.</p>
+      <div class="actions section"><button id="resume" type="button">Clear halt / Resume</button><button id="stop" class="danger" type="button">Stop bot</button></div>
+      <div id="notice" class="notice" role="status"></div>
+    </section>
+  </main>
+  <script>
+    const $ = id => document.getElementById(id);
+    const display = value => value == null ? "—" : `${value} ms`;
+    const setNotice = (text, kind = "") => { const n = $("notice"); n.textContent = text; n.className = `notice ${kind}`; };
+    function setTag(id, active, yes, no) { const el = $(id); el.textContent = active ? yes : no; el.className = `tag ${active ? "good" : "bad"}`; }
+    function positionRow(position) { const row=document.createElement("tr"), symbol=document.createElement("td"), quantity=document.createElement("td"); symbol.textContent=position.symbol; quantity.textContent=position.quantity; row.append(symbol,quantity); return row; }
+    function render(data) {
+      $("mode").textContent=data.mode; $("mode").className=`tag ${data.mode === "live" ? "bad" : data.mode === "testnet" ? "warn" : "good"}`;
+      setTag("armed",data.armed,"ARMED","SAFE"); setTag("halted",data.halted,"HALTED","CLEAR");
+      $("position-count").textContent=data.positions.length; $("pairs").replaceChildren(...data.pairs.map(p => { const el=document.createElement("span"); el.className="pair"; el.textContent=p; return el; }));
+      const positions=$("positions"); positions.replaceChildren();
+      if (!data.positions.length) { const row=document.createElement("tr"), cell=document.createElement("td"); cell.colSpan=2; cell.textContent="Tidak ada posisi terbuka."; row.appendChild(cell); positions.appendChild(row); } else data.positions.forEach(p => positions.appendChild(positionRow(p)));
+      const m=data.metrics; [["master-fills",m.master_fills],["orders",m.orders],["follower-fills",m.follower_fills],["signals",m.signals],["skips",m.skips],["errors",m.exec_errors]].forEach(([id,value]) => $(id).textContent=value);
+      $("detect-latency").textContent=[m.detect_p50_ms,m.detect_p95_ms,m.detect_p99_ms].map(display).join(" / "); $("e2e-latency").textContent=[m.e2e_p50_ms,m.e2e_p95_ms,m.e2e_p99_ms].map(display).join(" / "); $("skip-rate").textContent=`${m.skip_rate_pct.toFixed(1)}%`;
+      $("resume").disabled=!data.halted; $("updated").textContent=`Diperbarui ${new Date().toLocaleTimeString("id-ID")}`;
+    }
+    async function refresh() { try { const r=await fetch("/api/status",{cache:"no-store"}); if(!r.ok) throw new Error(`HTTP ${r.status}`); render(await r.json()); } catch(e) { setNotice(`Gagal memuat status: ${e.message}`,"error"); } }
+    async function action(path, confirmation) { if(!confirm(confirmation)) return; try { const r=await fetch(path,{method:"POST",headers:{"Content-Type":"application/json"},cache:"no-store"}); const body=await r.json(); if(!r.ok || !body.ok) throw new Error(body.message || `HTTP ${r.status}`); setNotice(body.message,"success"); await refresh(); } catch(e) { setNotice(`Aksi gagal: ${e.message}`,"error"); } }
+    $("resume").addEventListener("click",()=>action("/api/actions/resume","Clear halt dan izinkan order baru? Pastikan mismatch rekonsiliasi sudah ditinjau."));
+    $("stop").addEventListener("click",()=>action("/api/actions/stop","Stop bot sekarang? Proses dan dashboard akan berhenti secara graceful."));
+    refresh(); setInterval(refresh,5000);
+  </script>
+</body>
+</html>

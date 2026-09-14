@@ -27,6 +27,7 @@ Akun Master ──WS API user data──> MasterFeed ──> CopyTranslator ─�
 | Execution | `src/execution/engine.rs` | Paper (simulasi) / order MARKET via WS API (testnet/live) |
 | Monitor | `src/monitor/telegram.rs` | Alert Telegram satu arah, non-blocking |
 | Commands | `src/monitor/commands.rs` | Perintah interaktif `/status` `/stop` `/resume` |
+| Dashboard | `src/monitor/web.rs` | Status dan kontrol operator HTTP terautentikasi |
 | Store | `src/store.rs` | Event log append-only SQLite, di luar hot path |
 | Reconcile | `src/reconcile.rs` | Rekonsiliasi posisi vs exchange + auto-halt |
 | Metrics | `src/metrics.rs` | Latensi p50/p95/p99, skip rate, laporan berkala |
@@ -56,7 +57,20 @@ docker compose up -d --build        # build multi-stage, runtime non-root
 docker logs -f crybot
 ```
 
-Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony, region **AWS Tokyo (ap-northeast-1)** untuk Binance. Container tidak mengekspos port apa pun; event log SQLite persisten di volume `./data`.
+Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony, region **AWS Tokyo (ap-northeast-1)** untuk Binance. Saat dashboard diaktifkan, Compose mengekspos port `8080` hanya pada `127.0.0.1`; letakkan reverse proxy TLS di depannya. Event log SQLite persisten di volume `./data`.
+
+## Dashboard operator
+
+Dashboard menyediakan status yang sama dengan `/status` serta aksi `/resume`
+dan `/stop`. Akses memakai HTTP Basic Auth dari `DASHBOARD_USERNAME` dan
+`DASHBOARD_PASSWORD`; endpoint aksi juga hanya menerima origin yang sama
+dengan `monitor.dashboard_allowed_origin`.
+
+Untuk Docker, set `monitor.dashboard_enabled: true` dan
+`monitor.dashboard_bind: "0.0.0.0:8080"`, isi kedua credential dashboard di
+`.env`, lalu proxy `https://crybot.dna-server.cloud` ke `127.0.0.1:8080`.
+Contoh konfigurasi Caddy ada di `deploy/crybot.caddy`. Jangan membuka port
+8080 ke Internet secara langsung.
 
 ## Perintah Telegram interaktif
 

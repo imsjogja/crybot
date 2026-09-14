@@ -111,6 +111,19 @@ pub struct MonitorCfg {
     /// Perintah interaktif /status /stop /resume via getUpdates polling.
     #[serde(default = "default_commands_enabled")]
     pub commands_enabled: bool,
+    /// Dashboard operator HTTP. Nonaktif secara default agar tidak membuka UI
+    /// tanpa kredensial pada deployment lama.
+    #[serde(default)]
+    pub dashboard_enabled: bool,
+    #[serde(default = "default_dashboard_bind")]
+    pub dashboard_bind: String,
+    #[serde(default = "default_dashboard_username_env")]
+    pub dashboard_username_env: String,
+    #[serde(default = "default_dashboard_password_env")]
+    pub dashboard_password_env: String,
+    /// Origin HTTPS yang diizinkan untuk aksi mutasi dashboard.
+    #[serde(default)]
+    pub dashboard_allowed_origin: String,
 }
 
 fn default_metrics_interval() -> u64 {
@@ -119,6 +132,18 @@ fn default_metrics_interval() -> u64 {
 
 fn default_commands_enabled() -> bool {
     true
+}
+
+fn default_dashboard_bind() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
+fn default_dashboard_username_env() -> String {
+    "DASHBOARD_USERNAME".to_string()
+}
+
+fn default_dashboard_password_env() -> String {
+    "DASHBOARD_PASSWORD".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]

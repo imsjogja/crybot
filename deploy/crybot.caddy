@@ -1,0 +1,24 @@
+# Install as /etc/caddy/sites/crybot.caddy. Ensure /etc/caddy/Caddyfile
+# imports /etc/caddy/sites/*.caddy before validating and reloading Caddy.
+#
+# The application performs Basic Auth itself. Keep Docker's dashboard port on
+# 127.0.0.1 so it cannot bypass Caddy/TLS from the public network.
+crybot.dna-server.cloud {
+	reverse_proxy 127.0.0.1:8080
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		X-Robots-Tag "noindex, nofollow"
+	}
+
+	log {
+		output file /var/log/caddy/crybot-access.log {
+			roll_size 10MB
+			roll_keep 10
+		}
+	}
+}
