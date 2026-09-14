@@ -25,9 +25,10 @@ Akun Master ──WS API user data──> MasterFeed ──> CopyTranslator ─�
 | Translator | `src/copy/translator.rs` | Dedup, allowlist, burst guard, slippage guard, sizing |
 | Risk | `src/risk/manager.rs` | Kill switch (`armed`), halt flag, daily loss limit, max positions |
 | Execution | `src/execution/engine.rs` | Paper (simulasi) / order MARKET via WS API (testnet/live) |
-| Monitor | `src/monitor/telegram.rs` | Alert Telegram satu arah, non-blocking |
-| Commands | `src/monitor/commands.rs` | Perintah interaktif `/status` `/stop` `/resume` |
-| Dashboard | `src/monitor/web.rs` | Status dan kontrol operator HTTP terautentikasi |
+| Monitor | `src/monitor/telegram.rs` | Alert Telegram satu arah + kartu HTML + tombol inline, non-blocking |
+| Commands | `src/monitor/commands.rs` | Perintah interaktif `/status` `/stop` `/resume` (teks & tombol) |
+| Dashboard | `src/web.rs` + `assets/dashboard.html` | UI web visual: ekuitas, PnL, posisi, latensi, riwayat, kontrol |
+| PnL | `src/pnl.rs` | Realized PnL average-cost, win rate, PnL harian/total |
 | Store | `src/store.rs` | Event log append-only SQLite, di luar hot path |
 | Reconcile | `src/reconcile.rs` | Rekonsiliasi posisi vs exchange + auto-halt |
 | Metrics | `src/metrics.rs` | Latensi p50/p95/p99, skip rate, laporan berkala |
@@ -57,41 +58,38 @@ docker compose up -d --build        # build multi-stage, runtime non-root
 docker logs -f crybot
 ```
 
-Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony, region **AWS Tokyo (ap-northeast-1)** untuk Binance. Saat dashboard diaktifkan, Compose mengekspos port `8080` hanya pada `127.0.0.1`; letakkan reverse proxy TLS di depannya. Event log SQLite persisten di volume `./data`.
-
-## Dashboard operator
-
-Dashboard menyediakan status yang sama dengan `/status`, aksi `/resume` dan
-`/stop`, serta **Paper demo**. Paper demo hanya terlihat dan hanya dapat
-dijalankan saat `mode: paper`, `risk.armed: true`, dan halt tidak aktif. Aksi
-ini mengirim fill master sintetis pada harga `bookTicker` terkini melalui
-pipeline normal (translator → risk → paper execution), sehingga tidak membuat
-order atau transfer ke Binance. Jalankan simulated **BUY** sebelum **SELL**
-karena spot paper tidak mendukung short.
-
-Akses memakai HTTP Basic Auth dari `DASHBOARD_USERNAME` dan
-`DASHBOARD_PASSWORD`; seluruh endpoint aksi juga hanya menerima origin yang
-sama dengan `monitor.dashboard_allowed_origin`.
-
-Untuk Docker, salin `config/production.yaml.example` menjadi
-`config/production.yaml`, set `CRYBOT_CONFIG_PATH=config/production.yaml` dan
-isi kedua credential dashboard di `.env`. Lalu proxy
-`https://crybot.dna-server.cloud` ke `127.0.0.1:8080`. Contoh konfigurasi
-Caddy ada di `deploy/crybot.caddy`. Jangan membuka port 8080 ke Internet
-secara langsung.
+Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony, region **AWS Tokyo (ap-northeast-1)** untuk Binance. Container tidak mengekspos port apa pun; event log SQLite persisten di volume `./data`.
 
 ## Perintah Telegram interaktif
 
-Listener `getUpdates` long-polling merespons **hanya** dari `TELEGRAM_CHAT_ID` terkonfigurasi (pengirim lain diabaikan total dan di-log sebagai warning):
+Saat bot start, Telegram mengirim **tombol inline keyboard** (📊 Status · 🛑 Stop · ▶️ Resume) — pengguna awam tidak perlu menghafal perintah. Tombol dan perintah teks diproses identik, dan listener `getUpdates` merespons **hanya** dari `TELEGRAM_CHAT_ID` terkonfigurasi (pengirim lain diabaikan total dan di-log sebagai warning):
 
 | Perintah | Aksi |
 |---|---|
-| `/status` | Mode, armed, halt, pairs, posisi terbuka, metrik latensi p50/p95/p99 + skip rate |
-| `/stop` | Graceful shutdown bot (kill switch jarak jauh) |
-| `/resume` | Clear halt flag setelah mismatch rekonsiliasi **ditinjau manusia** — tercatat sebagai warning |
-| `/help` | Daftar perintah |
+| `/status` / tombol 📊 | Kartu status: mode, eksekusi, halt, ekuitas, PnL hari ini/total, win rate, posisi, latensi p95, aktivitas copy |
+| `/stop` / tombol 🛑 | Graceful shutdown bot (kill switch jarak jauh) |
+| `/resume` / tombol ▶️ | Clear halt flag setelah mismatch rekonsiliasi **ditinjau manusia** — tercatat sebagai warning |
+| `/help` | Daftar perintah + tombol kontrol |
 
 Nonaktifkan dengan `monitor.commands_enabled: false`.
+
+## Dashboard web
+
+UI visual single-file (tanpa CDN, dark theme, Bahasa Indonesia) untuk pengguna awam — auto-refresh 5 detik:
+
+- **Kartu status**: mode (PAPER/TESTNET/LIVE), eksekusi armed, halt, uptime
+- **Ekuitas & PnL**: ekuitas estimasi, PnL hari ini/total, unrealized, win rate
+- **Latensi**: deteksi & e2e p50/p95/p99 vs target, kesegaran harga pasar
+- **Aktivitas copy**: fill master, sinyal/skip, skip rate, order→fill, error
+- **Posisi terbuka** (qty, harga rata-rata, nilai, untung/rugi) dan **riwayat aktivitas** dari event log
+- **Kontrol**: tombol 🛑 Stop dan ▶️ Resume dengan dialog konfirmasi
+
+```bash
+# default bind 127.0.0.1:8080 — akses aman dari laptop via SSH tunnel:
+ssh -L 8080:127.0.0.1:8080 user@vps   # lalu buka http://127.0.0.1:8080
+```
+
+Bila `DASHBOARD_TOKEN` diisi di `.env`, semua `/api/*` wajib header `Authorization: Bearer <token>` (dashboard menampilkan kolom token otomatis saat diminta). **Jangan expose ke internet publik** tanpa reverse proxy TLS + token kuat. Nonaktifkan dengan `web.enabled: false`.
 
 ## Checklist keamanan (wajib sebelum live)
 
@@ -99,6 +97,7 @@ Nonaktifkan dengan `monitor.commands_enabled: false`.
 - [ ] Key follower: withdrawal **OFF**, **IP whitelist** ke IP statis server, spot only, di **sub-akun**
 - [ ] `.env` tidak pernah masuk git (sudah di-.gitignore)
 - [ ] `TELEGRAM_CHAT_ID` terverifikasi milik Anda (satu-satunya otoritas perintah)
+- [ ] `DASHBOARD_TOKEN` diisi kuat bila dashboard di-bind selain 127.0.0.1
 - [ ] `max_per_trade_usdt` diset konservatif
 - [ ] Alert Telegram terverifikasi menerima pesan start
 - [ ] Modal awal 10–25% dari alokasi copy (yang sendirinya 20–30% modal)
@@ -113,16 +112,17 @@ Nonaktifkan dengan `monitor.commands_enabled: false`.
 ## Testing
 
 ```bash
-cargo test                                              # 30 unit test (hermetik, tanpa jaringan)
+cargo test                                              # 36 unit test (hermetik, tanpa jaringan)
 cargo test --test public_stream -- --ignored --nocapture # integration test live (butuh jaringan)
 ```
 
 Cakupan unit test (replay event, tanpa koneksi live):
 - **Translator (10):** sizing equity-proportional/fixed/cap, skip min-notional (tidak dibulatkan naik), allowlist, dedup trade ID, slippage guard (lolos & skip), harga basi, burst guard.
 - **Risk Manager (9):** kill switch `armed`, halt flag reconciler, approve buy/sell, veto sell tanpa posisi, max positions (+add ke posisi existing tetap boleh), daily loss limit, clamp posisi negatif, hitungan posisi.
+- **PnL Tracker (5):** average-cost, realized profit/rugi, win rate, sell parsial, sell melebihi posisi.
 - **Reconciler (4):** kalkulasi drift posisi lokal vs exchange.
 - **Metrics (4):** percentile p50/p95/p99, window cap, skip rate, snapshot kosong.
-- **Commands (3):** parsing perintah Telegram (suffix bot, argumen, non-perintah).
+- **Commands (4):** parsing perintah Telegram (suffix bot, argumen, non-perintah, callback tombol).
 
 Integration test (`tests/public_stream.rs`, `#[ignore]` secara default):
 - `public_stream_bookticker` — verifikasi jalur market data riil tanpa key. **Catatan:** Binance mengembalikan HTTP 451 (geo-block) dari IP yurisdiksi terbatas; jalankan dari VPS deployment (mis. AWS Tokyo), bukan dari sembarang jaringan.
@@ -154,7 +154,7 @@ crypto-copy-bot/
 ├── config/config.yaml     # parameter non-rahasia
 ├── data/                  # SQLite event log (dibuat otomatis)
 ├── src/
-│   ├── main.rs            # wiring + graceful shutdown (Ctrl+C atau /stop)
+│   ├── main.rs            # wiring + graceful shutdown (Ctrl+C, /stop, atau dashboard)
 │   ├── lib.rs
 │   ├── events.rs          # tipe event
 │   ├── config.rs          # loader config
@@ -162,11 +162,15 @@ crypto-copy-bot/
 │   ├── copy/translator.rs
 │   ├── risk/manager.rs
 │   ├── execution/engine.rs
-│   ├── monitor/telegram.rs   # alert satu arah
-│   ├── monitor/commands.rs   # perintah /status /stop /resume
+│   ├── monitor/telegram.rs   # alert + kartu HTML + tombol inline
+│   ├── monitor/commands.rs   # perintah /status /stop /resume (teks & tombol)
+│   ├── web.rs             # dashboard web (axum) + API JSON
+│   ├── pnl.rs             # realized PnL average-cost + win rate
 │   ├── metrics.rs
 │   ├── reconcile.rs
 │   └── store.rs
+├── assets/
+│   └── dashboard.html     # UI dashboard single-file (di-embed ke binary)
 └── tests/
     └── public_stream.rs   # integration test live (#[ignore])
 ```
