@@ -66,11 +66,12 @@ dan `/stop`. Akses memakai HTTP Basic Auth dari `DASHBOARD_USERNAME` dan
 `DASHBOARD_PASSWORD`; endpoint aksi juga hanya menerima origin yang sama
 dengan `monitor.dashboard_allowed_origin`.
 
-Untuk Docker, set `monitor.dashboard_enabled: true` dan
-`monitor.dashboard_bind: "0.0.0.0:8080"`, isi kedua credential dashboard di
-`.env`, lalu proxy `https://crybot.dna-server.cloud` ke `127.0.0.1:8080`.
-Contoh konfigurasi Caddy ada di `deploy/crybot.caddy`. Jangan membuka port
-8080 ke Internet secara langsung.
+Untuk Docker, salin `config/production.yaml.example` menjadi
+`config/production.yaml`, set `CRYBOT_CONFIG_PATH=config/production.yaml` dan
+isi kedua credential dashboard di `.env`. Lalu proxy
+`https://crybot.dna-server.cloud` ke `127.0.0.1:8080`. Contoh konfigurasi
+Caddy ada di `deploy/crybot.caddy`. Jangan membuka port 8080 ke Internet
+secara langsung.
 
 ## Perintah Telegram interaktif
 

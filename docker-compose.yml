@@ -9,6 +9,7 @@ services:
     container_name: crybot
     # Exit bersih dari aksi Stop tidak dihidupkan kembali; crash masih dicoba ulang.
     restart: on-failure:5
+    command: ["crypto-copy-bot", "${CRYBOT_CONFIG_PATH:-config/config.yaml}"]
     env_file: .env            # API keys & Telegram — JANGAN commit file ini
     volumes:
       - ./data:/app/data      # event log SQLite persisten
