@@ -158,6 +158,17 @@ impl RiskManager {
         }
     }
 
+    /// Tambahkan realized PnL dari fill yang menutup posisi (daily loss limit).
+    pub fn add_realized_pnl(&mut self, pnl: Decimal) {
+        // hormati reset harian yang sama dengan evaluate()
+        let today = current_day();
+        if today != self.day_stamp {
+            self.day_stamp = today;
+            self.daily_realized_pnl = Decimal::ZERO;
+        }
+        self.daily_realized_pnl += pnl;
+    }
+
     pub fn open_positions(&self) -> usize {
         self.positions
             .read()
@@ -174,17 +185,19 @@ fn current_day() -> String {
     format!("day-{days}")
 }
 
-/// Feedback posisi dari Execution Engine: (symbol, side, qty).
-pub type FillFeedback = (String, Side, Decimal);
+/// Feedback posisi dari Execution Engine: (symbol, side, qty, price).
+/// price dipakai PnL tracker untuk realized PnL (average-cost).
+pub type FillFeedback = (String, Side, Decimal, Decimal);
 
 /// Task: SignalEvent -> RiskDecision -> OrderEvent / RiskEvent(+alert).
-/// Sekaligus menerima feedback fill untuk melacak posisi terbuka.
+/// Sekaligus menerima feedback fill untuk melacak posisi terbuka dan PnL.
 pub async fn run_risk_manager(
     mut rx: mpsc::Receiver<SignalEvent>,
     mut fill_rx: mpsc::Receiver<FillFeedback>,
     tx_order: mpsc::Sender<OrderEvent>,
     tx_monitor: mpsc::Sender<MonitorMsg>,
     mut risk: RiskManager,
+    pnl: crate::pnl::SharedPnl,
 ) {
     loop {
         tokio::select! {
@@ -207,8 +220,15 @@ pub async fn run_risk_manager(
                 }
             }
             maybe_fill = fill_rx.recv() => {
-                let Some((symbol, side, qty)) = maybe_fill else { return };
+                let Some((symbol, side, qty, price)) = maybe_fill else { return };
                 risk.apply_fill(&symbol, side, qty);
+                let realized = pnl
+                    .lock()
+                    .expect("pnl lock poisoned")
+                    .update(&symbol, side, qty, price);
+                if !realized.is_zero() {
+                    risk.add_realized_pnl(realized);
+                }
             }
         }
     }

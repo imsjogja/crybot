@@ -181,7 +181,7 @@ pub async fn run_execution(
                     "fill follower"
                 );
                 let _ = tx_fill_feedback
-                    .send((fill.symbol.clone(), fill.side, fill.qty))
+                    .send((fill.symbol.clone(), fill.side, fill.qty, fill.price))
                     .await;
                 let _ = tx_log
                     .send(LogEntry {
