@@ -24,6 +24,7 @@ pub enum Command {
     Status,
     Stop,
     Resume,
+    Flatten,
     Help,
     Unknown,
 }
@@ -36,6 +37,7 @@ pub fn parse_command(text: &str) -> Command {
         "/status" => Command::Status,
         "/stop" => Command::Stop,
         "/resume" => Command::Resume,
+        "/flatten" => Command::Flatten,
         "/help" | "/start" => Command::Help,
         _ => Command::Unknown,
     }
@@ -47,6 +49,7 @@ pub fn parse_callback(data: &str) -> Command {
         "status" => Command::Status,
         "stop" => Command::Stop,
         "resume" => Command::Resume,
+        "flatten" => Command::Flatten,
         _ => Command::Unknown,
     }
 }
@@ -169,9 +172,11 @@ Gunakan tombol di bawah, atau ketik perintah:\n\
 /status — kartu status lengkap\n\
 /stop — hentikan bot (graceful)\n\
 /resume — lanjutkan setelah halt (tinjau dulu penyebabnya!)\n\
+/flatten — TUTUP SEMUA posisi futures (darurat)\n\
 /help — pesan ini";
 
 /// Eksekusi perintah (dipakai oleh pesan teks maupun tombol).
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     cmd: Command,
     alerter: &TelegramAlerter,
@@ -182,6 +187,7 @@ async fn dispatch(
     pnl: &SharedPnl,
     tx_monitor: &mpsc::Sender<MonitorMsg>,
     tx_shutdown: &watch::Sender<bool>,
+    tx_flatten: &Option<tokio::sync::broadcast::Sender<()>>,
 ) {
     match cmd {
         Command::Status => {
@@ -207,6 +213,17 @@ async fn dispatch(
                 ))
                 .await;
         }
+        Command::Flatten => match tx_flatten {
+            Some(tx) => {
+                tracing::warn!("FLATTEN diminta via Telegram");
+                let _ = tx.send(());
+            }
+            None => {
+                alerter
+                    .send("ℹ️ Flatten hanya tersedia di mode futures (guard aktif).")
+                    .await;
+            }
+        },
         Command::Help => alerter.send_card(HELP, true).await,
         Command::Unknown => {}
     }
@@ -226,6 +243,7 @@ pub async fn run_command_listener(
     pnl: SharedPnl,
     tx_monitor: mpsc::Sender<MonitorMsg>,
     tx_shutdown: watch::Sender<bool>,
+    tx_flatten: Option<tokio::sync::broadcast::Sender<()>>,
 ) {
     if token.is_empty() || chat_id.is_empty() {
         tracing::warn!("perintah Telegram nonaktif: token/chat_id kosong");
@@ -296,6 +314,7 @@ pub async fn run_command_listener(
                     &pnl,
                     &tx_monitor,
                     &tx_shutdown,
+                    &tx_flatten,
                 )
                 .await;
                 continue;
@@ -320,6 +339,7 @@ pub async fn run_command_listener(
                 &pnl,
                 &tx_monitor,
                 &tx_shutdown,
+                &tx_flatten,
             )
             .await;
         }
@@ -358,6 +378,14 @@ mod tests {
         assert_eq!(parse_callback("status"), Command::Status);
         assert_eq!(parse_callback("stop"), Command::Stop);
         assert_eq!(parse_callback("resume"), Command::Resume);
+        assert_eq!(parse_callback("flatten"), Command::Flatten);
         assert_eq!(parse_callback("selfdestruct"), Command::Unknown);
+    }
+
+    #[test]
+    fn parse_perintah_flatten() {
+        assert_eq!(parse_command("/flatten"), Command::Flatten);
+        assert_eq!(parse_command("/flatten@CrybotID_bot"), Command::Flatten);
+        assert_eq!(parse_command("/flat"), Command::Unknown); // tidak ada alias ambigu
     }
 }

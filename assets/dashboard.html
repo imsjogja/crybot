@@ -47,6 +47,15 @@
   .scroll { max-height: 320px; overflow-y: auto; }
   #tokenBox { display:none; background: var(--card); border:1px solid var(--border); border-radius:10px; padding:20px; margin-bottom:16px; }
   #tokenBox input { width:100%; padding:10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); margin:8px 0; font-size:14px; }
+  .setrow { display:flex; align-items:center; gap:8px; padding:6px 0; border-bottom:1px dashed var(--border); font-size:14px; flex-wrap:wrap; }
+  .setrow label { flex:1; min-width:180px; }
+  .setrow input { width:130px; padding:7px 10px; border-radius:6px; border:1px solid var(--border); background:var(--bg); color:var(--text); font-size:14px; }
+  .setrow .def { color:var(--muted); font-size:12px; width:150px; }
+  .btn.small { padding:7px 12px; font-size:13px; }
+  .tier-SANGAT { color: var(--green); font-weight:700; }
+  .tier-LAYAK { color: var(--blue); font-weight:700; }
+  .tier-HATI { color: var(--yellow); font-weight:700; }
+  .tier-LEMAH, .tier-DITOLAK { color: var(--red); font-weight:700; }
   .footer { color: var(--muted); font-size: 12px; text-align: center; margin-top: 20px; }
 </style>
 </head>
@@ -102,8 +111,19 @@
 
 <div class="controls">
   <button class="btn go" onclick="doResume()">▶️ Resume (clear halt)</button>
+  <button class="btn danger" id="btnFlatten" onclick="doFlatten()">🧯 Flatten — tutup SEMUA posisi</button>
   <button class="btn danger" onclick="doStop()">🛑 Stop Bot</button>
   <button class="btn" onclick="loadAll()">🔄 Muat Ulang</button>
+</div>
+
+<div class="section card">
+  <h2>⚙️ Pengaturan Dinamis <span class="muted" style="font-weight:400">(berlaku langsung, tersimpan permanen — kosongkan untuk kembali ke default)</span></h2>
+  <div id="settingsForm"><span class="muted">Memuat…</span></div>
+</div>
+
+<div class="section card">
+  <h2>🏆 Screener Master Publik <span class="muted" style="font-weight:400">(skor kredibilitas 0–100)</span></h2>
+  <div class="scroll" id="scrTable"><span class="muted">Memuat…</span></div>
 </div>
 
 <div class="section card">
@@ -123,11 +143,14 @@ const pnlTxt = v => (v > 0 ? '+' : '') + fmt(v) + ' USDT';
 
 function token() { return localStorage.getItem('crybot_token') || ''; }
 function saveToken() { localStorage.setItem('crybot_token', $('tokenInput').value.trim()); location.reload(); }
-async function api(path, method='GET') {
-  const r = await fetch(path, { method, headers: token() ? { 'Authorization': 'Bearer ' + token() } : {} });
+async function api(path, method='GET', body=null) {
+  const opt = { method, headers: token() ? { 'Authorization': 'Bearer ' + token() } : {} };
+  if (body) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
+  const r = await fetch(path, opt);
   if (r.status === 401) { $('tokenBox').style.display = 'block'; throw new Error('unauthorized'); }
-  if (!r.ok) throw new Error('http ' + r.status);
-  return r.json();
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || ('http ' + r.status));
+  return j;
 }
 
 const DEMO = {
@@ -145,8 +168,9 @@ const DEMO_TRADES = { trades: [
 ]};
 
 function renderStatus(s) {
-  $('modeBadge').textContent = s.mode.toUpperCase();
+  $('modeBadge').textContent = s.mode.toUpperCase() + (s.market ? ' · ' + s.market.toUpperCase() : '');
   $('modeBadge').className = 'badge ' + (s.mode === 'Live' ? 'bad' : s.mode === 'Testnet' ? 'warn' : 'info');
+  $('btnFlatten').style.display = s.market === 'futures' ? '' : 'none';
   $('stBadge').textContent = s.armed ? 'EKSEKUSI AKTIF' : 'AMAN (armed off)';
   $('stBadge').className = 'badge ' + (s.armed ? 'ok' : 'warn');
   $('haltBadge').style.display = s.halt ? '' : 'none';
@@ -173,8 +197,13 @@ function renderStatus(s) {
   $('mErr').innerHTML = M.exec_errors ? `<span class="neg">${M.exec_errors}</span>` : '0';
 
   if (s.positions && s.positions.length) {
-    $('posTable').innerHTML = '<table><tr><th>Pair</th><th>Qty</th><th>Harga rata²</th><th>Harga kini</th><th>Nilai</th><th>Untung/Rugi</th></tr>' +
-      s.positions.map(p => `<tr><td><b>${p.symbol}</b></td><td>${p.qty}</td><td>${fmt(p.avg_cost,2)}</td><td>${fmt(p.mid,2)}</td><td>${fmt(p.value_usdt)} USDT</td><td class="${pnlCls(p.unrealized_usdt)}">${pnlTxt(p.unrealized_usdt)}</td></tr>`).join('') + '</table>';
+    const fut = s.market === 'futures';
+    $('posTable').innerHTML = '<table><tr><th>Pair</th>' + (fut ? '<th>Arah</th>' : '') + '<th>Qty</th><th>Harga rata²</th><th>Harga kini</th><th>Nilai</th><th>Untung/Rugi</th></tr>' +
+      s.positions.map(p => {
+        const q = parseFloat(p.qty);
+        const arah = fut ? `<td><span class="pill ${q >= 0 ? 'buy' : 'sell'}">${q >= 0 ? 'LONG' : 'SHORT'}</span></td>` : '';
+        return `<tr><td><b>${p.symbol}</b></td>${arah}<td>${p.qty}</td><td>${fmt(p.avg_cost,2)}</td><td>${fmt(p.mid,2)}</td><td>${fmt(Math.abs(p.value_usdt))} USDT</td><td class="${pnlCls(p.unrealized_usdt)}">${pnlTxt(p.unrealized_usdt)}</td></tr>`;
+      }).join('') + '</table>';
   } else {
     $('posTable').innerHTML = '<span class="muted">Tidak ada posisi terbuka.</span>';
   }
@@ -193,6 +222,75 @@ function renderTrades(t) {
       const side = String(f.side);
       return `<tr><td>${waktu}</td><td><span class="pill ${side==='Buy'?'buy':'sell'}">${side.toUpperCase()}${f.paper?' (paper)':''}</span></td><td><b>${f.symbol}</b></td><td>${f.qty}</td><td>${fmt(f.price,2)}</td><td>${fmtMs(f.e2e_latency_ms)}</td></tr>`;
     }).join('') + '</table>';
+}
+
+const SETTING_FIELDS = [
+  { key:'allocation_usdt',      label:'💵 Alokasi modal per trade (USDT)', def:'allocation_usdt' },
+  { key:'max_per_trade_usdt',   label:'🔒 Batas maksimum per trade (USDT)', def:'max_per_trade_usdt' },
+  { key:'daily_loss_limit_pct', label:'📉 Batas rugi harian (%)',           def:'daily_loss_limit_pct' },
+  { key:'sl_pct',               label:'🛡️ Jarak Stop Loss otomatis (%)',    def:'sl_pct' },
+  { key:'leverage',             label:'⚖️ Leverage futures (1–20, aktif setelah restart)', def:'leverage' },
+];
+
+function renderSettings(d) {
+  if (!d || !d.effective) { $('settingsForm').innerHTML = '<span class="muted">Pengaturan tidak tersedia.</span>'; return; }
+  $('settingsForm').innerHTML = SETTING_FIELDS.map(f => {
+    const ov = d.overrides[f.key];
+    const eff = d.effective[f.key];
+    const isOv = ov !== null && ov !== undefined;
+    return `<div class="setrow">
+      <label>${f.label}</label>
+      <input id="set_${f.key}" type="number" step="any" min="0" placeholder="${eff}" value="${isOv ? ov : ''}">
+      <span class="def">${isOv ? `override aktif (default ${eff})` : `default: ${eff}`}</span>
+      <button class="btn small go" onclick="saveSetting('${f.key}')">Simpan</button>
+      ${isOv ? `<button class="btn small" onclick="resetSetting('${f.key}')">Reset</button>` : ''}
+    </div>`;
+  }).join('') + `<div class="muted" style="font-size:12px;margin-top:8px">${d.note || ''}</div>`;
+}
+
+async function saveSetting(key) {
+  const v = $('set_' + key).value.trim();
+  if (!v) { alert('Isi nilai dulu, atau gunakan Reset untuk kembali ke default.'); return; }
+  try { await api('/api/settings', 'POST', { key, value: v }); loadSettings(); }
+  catch (e) { alert('Gagal menyimpan: ' + e.message); }
+}
+async function resetSetting(key) {
+  try { await api('/api/settings', 'POST', { key, value: null }); loadSettings(); }
+  catch (e) { alert('Gagal: ' + e.message); }
+}
+async function loadSettings() {
+  if (demo) return;
+  try { renderSettings(await api('/api/settings')); } catch (e) { /* biarkan */ }
+}
+
+function tierCls(t) { return 'tier-' + String(t).split(' ')[0].split('-')[0]; }
+
+function renderScreener(d) {
+  if (!d || !d.enabled) { $('scrTable').innerHTML = '<span class="muted">Screener nonaktif di config.</span>'; return; }
+  if (!d.candidates || !d.candidates.length) { $('scrTable').innerHTML = '<span class="muted">Belum ada data leaderboard (menunggu siklus screener pertama).</span>'; return; }
+  $('scrTable').innerHTML = '<table><tr><th>Master</th><th>Skor</th><th>Tier</th><th>ROI</th><th>MDD</th><th>Win rate</th><th>Umur</th><th>Copiers</th></tr>' +
+    d.candidates.map(c => `<tr>
+      <td><b>${c.name || c.id}</b>${c.red_flags && c.red_flags.length ? `<br><span class="neg" style="font-size:11px">🚩 ${c.red_flags.join(', ')}</span>` : ''}</td>
+      <td><b>${c.score}</b></td>
+      <td class="${tierCls(c.tier)}">${c.tier}</td>
+      <td class="${pnlCls(c.roi_pct)}">${fmt(c.roi_pct,1)}%</td>
+      <td class="${c.mdd_pct < 0 ? 'neg' : ''}">${fmt(c.mdd_pct,1)}%</td>
+      <td>${fmt(c.win_rate_pct,0)}%</td>
+      <td>${c.days_active} hari</td>
+      <td>${c.copiers}</td>
+    </tr>`).join('') + '</table>';
+}
+
+async function loadScreener() {
+  if (demo) { $('scrTable').innerHTML = '<span class="muted">Mode demo — screener butuh bot live.</span>'; return; }
+  try { renderScreener(await api('/api/screener')); } catch (e) { /* biarkan */ }
+}
+
+async function doFlatten() {
+  if (demo) { alert('Mode demo — tidak ada posisi yang ditutup.'); return; }
+  if (!confirm('🧯 FLATTEN: tutup SEMUA posisi futures di harga market SEKARANG?\n\nIni aksi darurat — semua posisi (profit maupun rugi) akan ditutup.')) return;
+  try { await api('/api/flatten', 'POST'); alert('Perintah flatten terkirim. Pantau Telegram untuk konfirmasi.'); }
+  catch (e) { alert('Gagal: ' + e.message); }
 }
 
 async function loadAll() {
@@ -221,7 +319,10 @@ async function doResume() {
 }
 
 loadAll();
+loadSettings();
+loadScreener();
 setInterval(loadAll, 5000);
+setInterval(loadScreener, 30000);
 </script>
 </body>
 </html>

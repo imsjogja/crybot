@@ -25,17 +25,30 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, watch};
 
-use crate::config::Mode;
+use crate::config::{Market, Mode};
 use crate::connectors::binance::SharedPrices;
 use crate::events::MonitorMsg;
 use crate::metrics::SharedMetrics;
 use crate::pnl::SharedPnl;
 use crate::risk::manager::{HaltFlag, SharedPositions};
+use crate::screener::SharedCandidates;
+use crate::settings::SharedSettings;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 
+/// Nilai default dari config.yaml — ditampilkan di UI saat override kosong.
+#[derive(Clone)]
+pub struct SettingsDefaults {
+    pub allocation_usdt: Decimal,
+    pub max_per_trade_usdt: Decimal,
+    pub daily_loss_limit_pct: Decimal,
+    pub sl_pct: Decimal,
+    pub leverage: u32,
+}
+
 pub struct WebState {
     pub mode: Mode,
+    pub market: Market,
     pub armed: bool,
     pub pairs: Vec<String>,
     pub started: Instant,
@@ -49,6 +62,10 @@ pub struct WebState {
     pub token: Option<String>,
     pub tx_shutdown: watch::Sender<bool>,
     pub tx_monitor: mpsc::Sender<MonitorMsg>,
+    pub settings: SharedSettings,
+    pub defaults: SettingsDefaults,
+    pub candidates: Option<SharedCandidates>,
+    pub tx_flatten: Option<tokio::sync::broadcast::Sender<()>>,
 }
 
 type Shared = Arc<WebState>;
@@ -122,9 +139,9 @@ async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
 
     let equity = st.start_equity + pnl_snap.realized_total + unrealized;
     let uptime_sec = st.started.elapsed().as_secs();
-
     Json(json!({
         "mode": format!("{:?}", st.mode),
+        "market": format!("{:?}", st.market).to_lowercase(),
         "armed": st.armed,
         "halt": st.halt.load(Ordering::SeqCst),
         "uptime_sec": uptime_sec,
@@ -208,6 +225,131 @@ async fn api_resume(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
     Json(json!({"ok": true, "action": "resume", "halt": false})).into_response()
 }
 
+/// GET /api/settings — override aktif + nilai efektif (override atau default config).
+async fn api_settings_get(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    let s = st.settings.read().await;
+    let eff = |ov: Option<Decimal>, def: Decimal| ov.unwrap_or(def);
+    Json(json!({
+        "overrides": {
+            "allocation_usdt": s.allocation_usdt.map(|d| d.to_string()),
+            "max_per_trade_usdt": s.max_per_trade_usdt.map(|d| d.to_string()),
+            "daily_loss_limit_pct": s.daily_loss_limit_pct.map(|d| d.to_string()),
+            "sl_pct": s.sl_pct.map(|d| d.to_string()),
+            "leverage": s.leverage,
+        },
+        "effective": {
+            "allocation_usdt": dec_f64(eff(s.allocation_usdt, st.defaults.allocation_usdt)),
+            "max_per_trade_usdt": dec_f64(eff(s.max_per_trade_usdt, st.defaults.max_per_trade_usdt)),
+            "daily_loss_limit_pct": dec_f64(eff(s.daily_loss_limit_pct, st.defaults.daily_loss_limit_pct)),
+            "sl_pct": dec_f64(eff(s.sl_pct, st.defaults.sl_pct)),
+            "leverage": s.leverage.unwrap_or(st.defaults.leverage),
+        },
+        "keys": crate::settings::KEYS,
+        "note": "kosongkan nilai untuk kembali ke default config.yaml; leverage berlaku setelah restart",
+    })).into_response()
+}
+
+/// POST /api/settings — body JSON {"key": "allocation_usdt", "value": "25" | null}.
+async fn api_settings_post(
+    State(st): State<Shared>,
+    headers: HeaderMap,
+    Json(body): Json<Value>,
+) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    let Some(key) = body.get("key").and_then(Value::as_str) else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "key wajib diisi"}))).into_response();
+    };
+    let value: Option<String> = match body.get("value") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+        Some(v) => Some(v.to_string()),
+    };
+    // Validasi dulu pada salinan — nilai rusak ditolak tanpa efek samping.
+    let mut trial = st.settings.read().await.clone();
+    if let Err(e) = trial.apply(key, value.as_deref()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": e.to_string()}))).into_response();
+    }
+    // Persist ke SQLite (bertahan lintas restart), baru apply ke memori bersama.
+    if let Err(e) = crate::settings::set_setting(&st.pool, key, value.as_deref()).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"error": format!("gagal menyimpan: {e}")})),
+        )
+            .into_response();
+    }
+    *st.settings.write().await = trial;
+    tracing::info!(key, value = ?value, "pengaturan diubah via dashboard");
+    let _ = st
+        .tx_monitor
+        .send(MonitorMsg::Info(format!(
+            "⚙️ Pengaturan diubah via web: {key} = {}",
+            value.as_deref().unwrap_or("(default config)")
+        )))
+        .await;
+    Json(json!({"ok": true, "key": key, "value": value})).into_response()
+}
+
+/// GET /api/screener — kandidat master + skor kredibilitas terkini.
+async fn api_screener(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    let Some(cands) = &st.candidates else {
+        return Json(json!({"enabled": false, "candidates": []})).into_response();
+    };
+    let list: Vec<Value> = cands
+        .read()
+        .await
+        .iter()
+        .map(|c| {
+            json!({
+                "id": c.stats.id,
+                "name": c.stats.name,
+                "score": c.score.total,
+                "tier": c.score.tier,
+                "red_flags": c.score.red_flags,
+                "roi_pct": c.stats.roi_pct,
+                "mdd_pct": c.stats.mdd_pct,
+                "win_rate_pct": c.stats.win_rate_pct,
+                "days_active": c.stats.days_active,
+                "copiers": c.stats.copiers,
+                "updated_ts_ms": c.updated_ts_ms,
+            })
+        })
+        .collect();
+    Json(json!({"enabled": true, "candidates": list})).into_response()
+}
+
+/// POST /api/flatten — tutup SEMUA posisi futures (darurat).
+async fn api_flatten(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    match &st.tx_flatten {
+        Some(tx) => {
+            tracing::warn!("FLATTEN via dashboard web");
+            let _ = st
+                .tx_monitor
+                .send(MonitorMsg::Critical(
+                    "FLATTEN diminta via dashboard web — menutup semua posisi".into(),
+                ))
+                .await;
+            let _ = tx.send(());
+            Json(json!({"ok": true, "action": "flatten"})).into_response()
+        }
+        None => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "flatten hanya tersedia di mode futures (guard aktif)"})),
+        )
+            .into_response(),
+    }
+}
+
 /// Jalankan HTTP server sampai sinyal shutdown.
 pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Receiver<bool>) {
     let app = Router::new()
@@ -216,6 +358,9 @@ pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Re
         .route("/api/trades", get(api_trades))
         .route("/api/stop", post(api_stop))
         .route("/api/resume", post(api_resume))
+        .route("/api/settings", get(api_settings_get).post(api_settings_post))
+        .route("/api/screener", get(api_screener))
+        .route("/api/flatten", post(api_flatten))
         .with_state(state);
 
     let listener = match tokio::net::TcpListener::bind(&bind).await {
