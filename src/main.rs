@@ -8,35 +8,32 @@
 //!   cargo run --release -- config/config.yaml
 
 use anyhow::{Context, Result};
-use std::{
-    path::PathBuf,
-    sync::{atomic::AtomicI64, Arc},
-};
+use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 
 use crypto_copy_bot::config::{env_secret, AppConfig, Mode};
-use crypto_copy_bot::connectors::binance;
+use crypto_copy_bot::connectors::binance as binance;
 use crypto_copy_bot::copy::translator::{run_translator, CopyTranslator};
 use crypto_copy_bot::events::{LogEntry, MasterFillEvent, MonitorMsg, OrderEvent, SignalEvent};
 use crypto_copy_bot::execution::engine::{run_execution, ExecutionEngine};
 use crypto_copy_bot::metrics::{self, new_shared_metrics};
 use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
 use crypto_copy_bot::monitor::telegram::{run_monitor, TelegramAlerter};
-use crypto_copy_bot::monitor::web::{
-    demo_master_notional, run_dashboard, DashboardConfig, DashboardState,
-};
+use crypto_copy_bot::pnl::new_shared_pnl;
 use crypto_copy_bot::reconcile;
 use crypto_copy_bot::risk::manager::{
     new_halt_flag, new_shared_positions, run_risk_manager, FillFeedback, RiskManager,
 };
 use crypto_copy_bot::store::{self, run_store};
+use crypto_copy_bot::web::{self, WebState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "info".into()),
         )
         .init();
 
@@ -67,16 +64,19 @@ async fn main() -> Result<()> {
     let prices = binance::new_shared_prices();
 
     // --- Equity untuk sizing ---------------------------------------------------
-    let master_equity =
-        match binance::fetch_usdt_balance("https://api.binance.com", &master_key, &master_secret)
-            .await
-        {
-            Ok(eq) if !eq.is_zero() => eq,
-            _ => {
-                tracing::warn!("equity master gagal diquery — pakai fallback config");
-                cfg.master.fallback_equity_usdt
-            }
-        };
+    let master_equity = match binance::fetch_usdt_balance(
+        "https://api.binance.com",
+        &master_key,
+        &master_secret,
+    )
+    .await
+    {
+        Ok(eq) if !eq.is_zero() => eq,
+        _ => {
+            tracing::warn!("equity master gagal diquery — pakai fallback config");
+            cfg.master.fallback_equity_usdt
+        }
+    };
     let follower_equity = if cfg.mode.is_paper() {
         cfg.follower.fallback_equity_usdt
     } else {
@@ -96,6 +96,8 @@ async fn main() -> Result<()> {
     let positions = new_shared_positions();
     let halt = new_halt_flag();
     let metrics = new_shared_metrics();
+    let pnl = new_shared_pnl();
+    let started = std::time::Instant::now();
     let risk = RiskManager::new(
         cfg.risk.clone(),
         cfg.copy.max_open_positions,
@@ -123,11 +125,6 @@ async fn main() -> Result<()> {
     let tg_token = std::env::var(&cfg.monitor.telegram_bot_token_env).unwrap_or_default();
     let tg_chat = std::env::var(&cfg.monitor.telegram_chat_id_env).unwrap_or_default();
     let tg = TelegramAlerter::new(tg_token.clone(), tg_chat.clone());
-    let static_info = StaticInfo {
-        mode: cfg.mode,
-        armed: cfg.risk.armed,
-        pairs: cfg.copy.symbol_allowlist.clone(),
-    };
 
     // --- Spawn tasks -------------------------------------------------------------
     let mut handles = Vec::new();
@@ -137,7 +134,7 @@ async fn main() -> Result<()> {
         Mode::Live.ws_api_url().to_string(),
         master_key,
         master_secret,
-        tx_master.clone(),
+        tx_master,
         rx_shutdown.clone(),
     )));
     handles.push(tokio::spawn(binance::run_market_data(
@@ -159,6 +156,7 @@ async fn main() -> Result<()> {
         tx_order,
         tx_monitor.clone(),
         risk,
+        pnl.clone(),
     )));
     handles.push(tokio::spawn(run_execution(
         rx_order,
@@ -175,47 +173,22 @@ async fn main() -> Result<()> {
             tg_token,
             tg_chat,
             tg.clone(),
-            static_info.clone(),
+            StaticInfo {
+                mode: cfg.mode,
+                armed: cfg.risk.armed,
+                pairs: cfg.copy.symbol_allowlist.clone(),
+                started,
+                start_equity: follower_equity,
+            },
             metrics.clone(),
             positions.clone(),
             halt.clone(),
+            pnl.clone(),
             tx_monitor.clone(),
             tx_shutdown.clone(),
         )));
     }
-    if cfg.monitor.dashboard_enabled {
-        let username = env_secret(&cfg.monitor.dashboard_username_env, true)?;
-        let password = env_secret(&cfg.monitor.dashboard_password_env, true)?;
-        let dashboard_cfg = DashboardConfig {
-            bind: cfg.monitor.dashboard_bind.clone(),
-            allowed_origin: cfg.monitor.dashboard_allowed_origin.clone(),
-            username,
-            password,
-        };
-        let dashboard_state = DashboardState {
-            info: static_info.clone(),
-            metrics: metrics.clone(),
-            positions: positions.clone(),
-            halt: halt.clone(),
-            prices: prices.clone(),
-            demo_master_notional_usdt: demo_master_notional(
-                &cfg.copy,
-                master_equity,
-                follower_equity,
-            ),
-            demo_trade_ids: Arc::new(AtomicI64::new(-1)),
-            tx_master: tx_master.clone(),
-            tx_log: tx_log.clone(),
-            tx_monitor: tx_monitor.clone(),
-            tx_shutdown: tx_shutdown.clone(),
-        };
-        handles.push(tokio::spawn(async move {
-            if let Err(error) = run_dashboard(dashboard_cfg, dashboard_state).await {
-                tracing::error!(%error, "dashboard berhenti");
-            }
-        }));
-    }
-    handles.push(tokio::spawn(run_store(rx_log, pool)));
+    handles.push(tokio::spawn(run_store(rx_log, pool.clone())));
     handles.push(tokio::spawn(reconcile::run_reconciler(
         cfg.reconcile.clone(),
         cfg.mode,
@@ -235,6 +208,35 @@ async fn main() -> Result<()> {
         cfg.monitor.metrics_interval_min,
         rx_shutdown.clone(),
     )));
+
+    // Dashboard web (UI visual — default hanya localhost, token via DASHBOARD_TOKEN)
+    if cfg.web.enabled {
+        let token = std::env::var("DASHBOARD_TOKEN").ok().filter(|t| !t.is_empty());
+        if cfg.web.bind != "127.0.0.1:8080" && token.is_none() {
+            tracing::warn!("dashboard bind non-localhost TANPA DASHBOARD_TOKEN — tidak disarankan!");
+        }
+        let state = std::sync::Arc::new(WebState {
+            mode: cfg.mode,
+            armed: cfg.risk.armed,
+            pairs: cfg.copy.symbol_allowlist.clone(),
+            started,
+            start_equity: follower_equity,
+            positions: positions.clone(),
+            halt: halt.clone(),
+            metrics: metrics.clone(),
+            pnl: pnl.clone(),
+            prices: prices.clone(),
+            pool: pool.clone(),
+            token,
+            tx_shutdown: tx_shutdown.clone(),
+            tx_monitor: tx_monitor.clone(),
+        });
+        handles.push(tokio::spawn(web::run_web_server(
+            state,
+            cfg.web.bind.clone(),
+            rx_shutdown.clone(),
+        )));
+    }
 
     // Heartbeat (Bagian 7: deteksi bot mati)
     let tx_hb = tx_monitor.clone();
