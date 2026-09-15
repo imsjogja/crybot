@@ -29,10 +29,10 @@ use sqlx::SqlitePool;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::config::{Mode, StrategiesCfg};
-use crate::events::{MonitorMsg, WebWsMsg};
+use crate::events::{MonitorMsg, WsBroadcast};
 use crate::metrics::SharedMetrics;
 use crate::risk::{HaltFlag, SharedRiskEngine};
 
@@ -53,6 +53,7 @@ pub struct WebState {
     /// Risk engine (§7) — status risk di /api/status, halt/resume via API.
     pub risk: SharedRiskEngine,
     pub started: Instant,
+    pub tx_ws: broadcast::Sender<String>,
 }
 
 type Shared = Arc<WebState>;
@@ -95,15 +96,10 @@ async fn dashboard() -> Html<&'static str> {
     Html(DASHBOARD_HTML)
 }
 
-async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
-    if !authorized(&st, &headers) {
-        return unauthorized().into_response();
-    }
-
+fn build_status_json(st: &WebState) -> Value {
     let snap = st.metrics.snapshot();
     let uptime_sec = st.started.elapsed().as_secs();
-
-    Json(json!({
+    json!({
         "mode": format!("{:?}", st.mode),
         "armed": st.armed,
         "halt": st.halt.load(Ordering::SeqCst),
@@ -129,28 +125,57 @@ async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
             "sign_p95": fmt_ms(snap.sign_p95),
             "submit_p95": fmt_ms(snap.submit_p95),
         }
-    }))
-    .into_response()
+    })
 }
 
-fn strategy_statuses(strategies: &StrategiesCfg) -> Vec<Value> {
-    vec![
-        json!({"name": "sniper", "enabled": strategies.sniper.enabled}),
-        json!({"name": "copy_onchain", "enabled": strategies.copy_onchain.enabled}),
-        json!({"name": "grid_dca", "enabled": strategies.grid_dca.enabled}),
-        json!({"name": "arbitrage", "enabled": strategies.arbitrage.enabled}),
-        json!({"name": "yield_farming", "enabled": strategies.yield_farming.enabled}),
-        json!({"name": "perps", "enabled": strategies.perps.enabled}),
-    ]
+async fn build_trades_json(pool: &SqlitePool) -> Value {
+    let rows: Vec<(i64, String, String)> = sqlx::query_as(
+        "SELECT ts_ms, kind, payload FROM events
+         WHERE kind IN ('base_swap', 'base_execution_error')
+         ORDER BY id DESC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    let trades: Vec<Value> = rows
+        .into_iter()
+        .map(|(ts_ms, kind, payload)| {
+            let parsed: Value = serde_json::from_str(&payload).unwrap_or(json!(payload));
+            json!({"ts_ms": ts_ms, "kind": kind, "data": parsed})
+        })
+        .collect();
+    json!({"trades": trades})
 }
 
-async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
-    if !authorized(&st, &headers) {
-        return unauthorized().into_response();
-    }
+async fn build_signals_json(pool: &SqlitePool) -> Value {
+    let rows: Vec<(i64, String, String, String, i64, String)> = sqlx::query_as(
+        "SELECT ts_ms, strategy, pair, side, score, reasons
+         FROM signals ORDER BY id DESC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
 
-    let strategies = &st.strategies;
-    Json(json!({"strategies": [
+    let signals: Vec<Value> = rows
+        .into_iter()
+        .map(|(ts_ms, strategy, pair, side, score, reasons)| {
+            let parsed: Value = serde_json::from_str(&reasons).unwrap_or(json!([]));
+            json!({
+                "ts_ms": ts_ms,
+                "strategy": strategy,
+                "pair": pair,
+                "side": side,
+                "score": score,
+                "reasons": parsed,
+            })
+        })
+        .collect();
+    json!({"signals": signals})
+}
+
+fn build_strategies_json(strategies: &StrategiesCfg) -> Value {
+    json!({"strategies": [
         {
             "name": "sniper",
             "enabled": strategies.sniper.enabled,
@@ -190,8 +215,40 @@ async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl In
             "configured": !strategies.perps.positions.is_empty(),
             "configured_positions": strategies.perps.positions.len(),
         },
-    ]}))
-    .into_response()
+    ]})
+}
+
+fn broadcast_status_update(st: &WebState) {
+    let status = build_status_json(st);
+    let broadcast = WsBroadcast::StatusUpdate { data: status };
+    if let Ok(json) = serde_json::to_string(&broadcast) {
+        let _ = st.tx_ws.send(json);
+    }
+}
+
+async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    Json(build_status_json(&st)).into_response()
+}
+
+fn strategy_statuses(strategies: &StrategiesCfg) -> Vec<Value> {
+    vec![
+        json!({"name": "sniper", "enabled": strategies.sniper.enabled}),
+        json!({"name": "copy_onchain", "enabled": strategies.copy_onchain.enabled}),
+        json!({"name": "grid_dca", "enabled": strategies.grid_dca.enabled}),
+        json!({"name": "arbitrage", "enabled": strategies.arbitrage.enabled}),
+        json!({"name": "yield_farming", "enabled": strategies.yield_farming.enabled}),
+        json!({"name": "perps", "enabled": strategies.perps.enabled}),
+    ]
+}
+
+async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    Json(build_strategies_json(&st.strategies)).into_response()
 }
 
 type PositionRow = (String, String, String, String, f64, f64, i64, Option<f64>);
@@ -233,57 +290,16 @@ async fn api_trades(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
     }
-    let rows: Vec<(i64, String, String)> = sqlx::query_as(
-        "SELECT ts_ms, kind, payload FROM events
-         WHERE kind IN ('base_swap', 'base_execution_error')
-         ORDER BY id DESC LIMIT 100",
-    )
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
-
-    let trades: Vec<Value> = rows
-        .into_iter()
-        .map(|(ts_ms, kind, payload)| {
-            let parsed: Value = serde_json::from_str(&payload).unwrap_or(json!(payload));
-            json!({"ts_ms": ts_ms, "kind": kind, "data": parsed})
-        })
-        .collect();
-    Json(json!({"trades": trades})).into_response()
+    Json(build_trades_json(&st.pool).await).into_response()
 }
 
-/// Sinyal multi-faktor terbaru dari tabel signals (blueprint §5/§12).
 async fn api_signals(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
     }
-    let rows: Vec<(i64, String, String, String, i64, String)> = sqlx::query_as(
-        "SELECT ts_ms, strategy, pair, side, score, reasons
-         FROM signals ORDER BY id DESC LIMIT 100",
-    )
-    .fetch_all(&st.pool)
-    .await
-    .unwrap_or_default();
-
-    let signals: Vec<Value> = rows
-        .into_iter()
-        .map(|(ts_ms, strategy, pair, side, score, reasons)| {
-            let parsed: Value = serde_json::from_str(&reasons).unwrap_or(json!([]));
-            json!({
-                "ts_ms": ts_ms,
-                "strategy": strategy,
-                "pair": pair,
-                "side": side,
-                "score": score,
-                "reasons": parsed,
-            })
-        })
-        .collect();
-    Json(json!({"signals": signals})).into_response()
+    Json(build_signals_json(&st.pool).await).into_response()
 }
 
-/// Keputusan risk engine terbaru (PASS/REJECT) — audit deterministic
-/// blocking (blueprint §7/§12).
 async fn api_risk(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
@@ -332,7 +348,6 @@ async fn api_stop(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResp
     Json(json!({"ok": true, "action": "stop"})).into_response()
 }
 
-/// Emergency stop via dashboard (blueprint §13): BUY OFF, monitoring ON.
 async fn api_halt(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
@@ -345,6 +360,7 @@ async fn api_halt(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResp
             "EMERGENCY STOP via dashboard web: halt flag aktif (§13)".into(),
         ))
         .await;
+    broadcast_status_update(&st);
     Json(json!({"ok": true, "action": "halt", "halt": true})).into_response()
 }
 
@@ -353,7 +369,6 @@ async fn api_resume(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
         return unauthorized().into_response();
     }
     tracing::warn!("halt di-resume via dashboard web");
-    // Resume via risk engine: clear halt + reset circuit breaker (§13).
     st.risk.resume();
     let _ = st
         .tx_monitor
@@ -361,42 +376,66 @@ async fn api_resume(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
             "RESUME via dashboard web: halt flag di-clear oleh operator".into(),
         ))
         .await;
+    broadcast_status_update(&st);
     Json(json!({"ok": true, "action": "resume", "halt": false})).into_response()
-}
-
-async fn send_strategy_statuses(socket: &mut WebSocket, strategies: &StrategiesCfg) -> bool {
-    for status in strategy_statuses(strategies) {
-        let enabled = status["enabled"].as_bool().unwrap_or(false);
-        let name = status["name"].as_str().unwrap_or("unknown").to_owned();
-        let payload = match serde_json::to_string(&WebWsMsg::Status {
-            strategy: name,
-            enabled,
-        }) {
-            Ok(payload) => payload,
-            Err(error) => {
-                tracing::warn!(error = %error, "gagal serialisasi status WebSocket");
-                return false;
-            }
-        };
-        if socket.send(Message::Text(payload.into())).await.is_err() {
-            return false;
-        }
-    }
-    true
 }
 
 async fn ws_status(socket: WebSocket, st: Shared) {
     let mut socket = socket;
-    if !send_strategy_statuses(&mut socket, &st.strategies).await {
+    let mut rx = st.tx_ws.subscribe();
+
+    let status = build_status_json(&st);
+    let trades = build_trades_json(&st.pool).await;
+    let signals = build_signals_json(&st.pool).await;
+    let strategies = build_strategies_json(&st.strategies);
+
+    let init = WsBroadcast::Init {
+        status,
+        trades,
+        signals,
+        strategies,
+    };
+    let init_json = match serde_json::to_string(&init) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!(error = %e, "gagal serialisasi WS init");
+            return;
+        }
+    };
+    if socket.send(Message::Text(init_json.into())).await.is_err() {
         return;
     }
 
-    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(5));
+    let mut heartbeat = tokio::time::interval(std::time::Duration::from_secs(30));
     heartbeat.tick().await;
+
     loop {
-        heartbeat.tick().await;
-        if !send_strategy_statuses(&mut socket, &st.strategies).await {
-            return;
+        tokio::select! {
+            msg = rx.recv() => {
+                match msg {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::debug!(skipped = n, "ws client lagged, skipping old messages");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            _ = heartbeat.tick() => {
+                let ping = r#"{"type":"ping"}"#;
+                if socket.send(Message::Text(ping.into())).await.is_err() {
+                    return;
+                }
+            }
+            incoming = socket.recv() => {
+                match incoming {
+                    Some(Ok(_)) => {}
+                    _ => return,
+                }
+            }
         }
     }
 }

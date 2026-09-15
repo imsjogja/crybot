@@ -109,6 +109,34 @@ pub enum StrategyEvent {
     },
 }
 
+/// Event broadcast dari store/API ke semua WebSocket client.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum WsBroadcast {
+    Init {
+        status: serde_json::Value,
+        trades: serde_json::Value,
+        signals: serde_json::Value,
+        strategies: serde_json::Value,
+    },
+    StatusUpdate {
+        data: serde_json::Value,
+    },
+    NewSignal {
+        ts_ms: i64,
+        strategy: String,
+        pair: String,
+        side: String,
+        score: i64,
+        reasons: String,
+    },
+    NewTrade {
+        ts_ms: i64,
+        kind: String,
+        data: serde_json::Value,
+    },
+}
+
 /// WebSocket message untuk dashboard real-time fan-out.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]

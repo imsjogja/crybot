@@ -115,7 +115,7 @@
   <main>
     <section id="overview" role="tabpanel" aria-labelledby="tab-overview">
       <div class="action-bar">
-        <span class="action-note">Refresh otomatis setiap 5 detik. Tidak ada tombol untuk mengaktifkan perdagangan live.</span>
+        <span class="action-note">Data diperbarui real-time via WebSocket. Tidak ada tombol untuk mengaktifkan perdagangan live.</span>
         <button class="btn danger" id="haltBtn" type="button" onclick="doHalt()">Emergency halt</button>
         <button class="btn resume" id="resumeBtn" type="button" onclick="doResume()">Clear halt</button>
         <button class="btn danger" type="button" onclick="doStop()">Stop bot</button>
@@ -141,7 +141,7 @@
     <section id="perps" role="tabpanel" aria-labelledby="tab-perps" hidden><div class="feature"><h2>Perps</h2><p>Perpetual futures memiliki leverage dan risiko likuidasi. Tidak ada kontrol leverage di UI ini.</p><div class="info-box"><h3>Status</h3><p id="strategyPerps">Memeriksa endpoint strategi…</p></div></div></section>
     <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden><div class="feature"><h2>Riwayat aktivitas</h2><p>Swap Base dan error eksekusi terbaru dari event log.</p><div id="historyTable" class="empty">Memuat riwayat…</div></div></section>
   </main>
-  <footer class="footer">crybot Base Network dashboard · polling 5 detik · perubahan konfigurasi dan arming dilakukan di server, bukan dari UI</footer>
+  <footer class="footer">crybot Base Network dashboard · real-time WebSocket · perubahan konfigurasi dan arming dilakukan di server, bukan dari UI</footer>
 
 <script>
 'use strict';
@@ -235,24 +235,70 @@ async function loadAll() {
     setConnection('Server tidak terhubung', 'bad'); $('demoBanner').style.display = 'block';
   }
 }
+let localSignals = [];
+let localTrades = [];
 function connectWebSocket() {
-  if (!('WebSocket' in window)) { setConnection('Polling aktif', 'info'); return; }
-  try {
-    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const t = token();
-    const wsUrl = `${protocol}//${location.host}/ws${t ? '?token=' + encodeURIComponent(t) : ''}`;
-    const ws = new WebSocket(wsUrl);
-    ws.onopen = () => setConnection('WebSocket terhubung', 'ok');
-    ws.onmessage = () => loadAll();
-    ws.onerror = () => setConnection('Polling aktif', 'info');
-    ws.onclose = () => setConnection('Polling aktif', 'info');
-  } catch (_) { setConnection('Polling aktif', 'info'); }
+  if (!('WebSocket' in window)) { setConnection('Polling fallback', 'info'); loadAll(); setInterval(loadAll, 5000); return; }
+  let retryDelay = 3000;
+  function connect() {
+    try {
+      const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const t = token();
+      const wsUrl = `${protocol}//${location.host}/ws${t ? '?token=' + encodeURIComponent(t) : ''}`;
+      const ws = new WebSocket(wsUrl);
+      ws.onopen = () => { setConnection('WebSocket terhubung', 'ok'); $('demoBanner').style.display = 'none'; retryDelay = 3000; };
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          switch (msg.type) {
+            case 'Init':
+              renderStatus(msg.status);
+              renderTrades(msg.trades);
+              localTrades = msg.trades && Array.isArray(msg.trades.trades) ? msg.trades.trades : [];
+              renderSignals(msg.signals);
+              localSignals = msg.signals && Array.isArray(msg.signals.signals) ? msg.signals.signals : [];
+              renderOptionalStrategies({ available: true, data: msg.strategies });
+              break;
+            case 'StatusUpdate':
+              renderStatus(msg.data);
+              break;
+            case 'NewSignal': {
+              let reasons = msg.reasons;
+              try { reasons = JSON.parse(reasons); } catch (_) {}
+              const sig = { ts_ms: msg.ts_ms, strategy: msg.strategy, pair: msg.pair, side: msg.side, score: msg.score, reasons };
+              localSignals.unshift(sig);
+              if (localSignals.length > 100) localSignals.length = 100;
+              renderSignals({ signals: localSignals });
+              break;
+            }
+            case 'NewTrade': {
+              const trade = { ts_ms: msg.ts_ms, kind: msg.kind, data: msg.data };
+              localTrades.unshift(trade);
+              if (localTrades.length > 100) localTrades.length = 100;
+              renderTrades({ trades: localTrades });
+              break;
+            }
+          }
+        } catch (_) {}
+      };
+      ws.onerror = () => {};
+      ws.onclose = () => {
+        setConnection('Menghubungkan ulang…', 'warn');
+        setTimeout(() => { retryDelay = Math.min(retryDelay * 2, 30000); connect(); }, retryDelay);
+      };
+    } catch (_) {
+      setConnection('Polling fallback', 'info');
+      loadAll();
+      setInterval(loadAll, 5000);
+    }
+  }
+  connect();
 }
 async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
-async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); loadAll(); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
-async function doHalt() { if (!confirm('Emergency halt: hentikan SEMUA order buy baru sekarang? Monitoring tetap berjalan.')) return; try { await api('/api/halt', 'POST'); loadAll(); } catch (error) { alert(`Gagal halt: ${error.message}`); } }
+async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
+async function doHalt() { if (!confirm('Emergency halt: hentikan SEMUA order buy baru sekarang? Monitoring tetap berjalan.')) return; try { await api('/api/halt', 'POST'); } catch (error) { alert(`Gagal halt: ${error.message}`); } }
 document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }));
-loadAll(); connectWebSocket(); setInterval(loadAll, 5000);
+connectWebSocket();
 </script>
 </body>
 </html>

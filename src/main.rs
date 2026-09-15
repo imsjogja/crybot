@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
     let (tx_log, rx_log) = mpsc::channel::<LogEntry>(4096);
     let (tx_monitor, rx_monitor) = mpsc::channel::<MonitorMsg>(256);
     let (tx_shutdown, rx_shutdown) = watch::channel(false);
+    let (tx_ws, _rx_ws) = tokio::sync::broadcast::channel::<String>(256);
 
     let metrics = new_shared_metrics();
     let started = std::time::Instant::now();
@@ -117,7 +118,7 @@ async fn main() -> Result<()> {
     )));
 
     handles.push(tokio::spawn(strategy_engine.run()));
-    handles.push(tokio::spawn(run_store(rx_log, pool.clone())));
+    handles.push(tokio::spawn(run_store(rx_log, pool.clone(), tx_ws.clone())));
     handles.push(tokio::spawn(run_monitor(rx_monitor, tg.clone())));
 
     if cfg.monitor.commands_enabled {
@@ -167,6 +168,7 @@ async fn main() -> Result<()> {
             halt: halt.clone(),
             risk: risk.clone(),
             started,
+            tx_ws: tx_ws.clone(),
         });
         handles.push(tokio::spawn(web::run_web_server(
             state,

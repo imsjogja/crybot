@@ -8,7 +8,7 @@ use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
-use crate::events::LogEntry;
+use crate::events::{LogEntry, WsBroadcast};
 
 pub async fn init_pool(path: &str) -> Result<SqlitePool> {
     let opts = SqliteConnectOptions::new()
@@ -190,7 +190,11 @@ pub async fn init_pool(path: &str) -> Result<SqlitePool> {
 /// Selain append ke `events` (audit log mentah), entry dengan kind tertentu
 /// juga diindeks ke tabel terstruktur blueprint §12 (risk_decisions, trades)
 /// agar bisa di-query dashboard/API tanpa parsing JSON.
-pub async fn run_store(mut rx: mpsc::Receiver<LogEntry>, pool: SqlitePool) {
+pub async fn run_store(
+    mut rx: mpsc::Receiver<LogEntry>,
+    pool: SqlitePool,
+    tx_ws: tokio::sync::broadcast::Sender<String>,
+) {
     while let Some(entry) = rx.recv().await {
         if let Err(e) = sqlx::query("INSERT INTO events (ts_ms, kind, payload) VALUES (?, ?, ?)")
             .bind(entry.ts_ms)
@@ -207,37 +211,54 @@ pub async fn run_store(mut rx: mpsc::Receiver<LogEntry>, pool: SqlitePool) {
         let parsed: serde_json::Value = serde_json::from_str(&entry.payload).unwrap_or_default();
         let result = match entry.kind.as_str() {
             "signal_created" => {
-                sqlx::query(
+                let strategy = parsed["strategy"].as_str().unwrap_or("").to_owned();
+                let pair = parsed["pair"].as_str().unwrap_or("").to_owned();
+                let side = parsed["side"].as_str().unwrap_or("").to_owned();
+                let score = parsed["score"].as_i64().unwrap_or(0);
+                let reasons = parsed["reasons"].to_string();
+                let res = sqlx::query(
                     "INSERT INTO signals (ts_ms, strategy, pair, side, score, reasons)
                      VALUES (?, ?, ?, ?, ?, ?)",
                 )
                 .bind(entry.ts_ms)
-                .bind(parsed["strategy"].as_str().unwrap_or(""))
-                .bind(parsed["pair"].as_str().unwrap_or(""))
-                .bind(parsed["side"].as_str().unwrap_or(""))
-                .bind(parsed["score"].as_i64().unwrap_or(0))
-                .bind(parsed["reasons"].to_string())
+                .bind(&strategy)
+                .bind(&pair)
+                .bind(&side)
+                .bind(score)
+                .bind(&reasons)
                 .execute(&pool)
                 .await
-                .map(|_| ())
+                .map(|_| ());
+                if res.is_ok() {
+                    let broadcast = WsBroadcast::NewSignal {
+                        ts_ms: entry.ts_ms,
+                        strategy,
+                        pair,
+                        side,
+                        score,
+                        reasons,
+                    };
+                    if let Ok(json) = serde_json::to_string(&broadcast) {
+                        let _ = tx_ws.send(json);
+                    }
+                }
+                res
             }
-            "risk_decided" => {
-                sqlx::query(
-                    "INSERT INTO risk_decisions (ts_ms, decision, strategy, pair, side, reasons)
+            "risk_decided" => sqlx::query(
+                "INSERT INTO risk_decisions (ts_ms, decision, strategy, pair, side, reasons)
                      VALUES (?, ?, ?, ?, ?, ?)",
-                )
-                .bind(entry.ts_ms)
-                .bind(parsed["decision"].as_str().unwrap_or("reject"))
-                .bind(parsed["strategy"].as_str().unwrap_or(""))
-                .bind(parsed["pair"].as_str().unwrap_or(""))
-                .bind(parsed["side"].as_str().unwrap_or(""))
-                .bind(parsed["reasons"].to_string())
-                .execute(&pool)
-                .await
-                .map(|_| ())
-            }
+            )
+            .bind(entry.ts_ms)
+            .bind(parsed["decision"].as_str().unwrap_or("reject"))
+            .bind(parsed["strategy"].as_str().unwrap_or(""))
+            .bind(parsed["pair"].as_str().unwrap_or(""))
+            .bind(parsed["side"].as_str().unwrap_or(""))
+            .bind(parsed["reasons"].to_string())
+            .execute(&pool)
+            .await
+            .map(|_| ()),
             "base_swap" => {
-                sqlx::query(
+                let res = sqlx::query(
                     "INSERT INTO trades (ts_ms, strategy, pair, side, status, tx_hash, submit_ack_ms, e2e_ms)
                      VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 )
@@ -251,7 +272,18 @@ pub async fn run_store(mut rx: mpsc::Receiver<LogEntry>, pool: SqlitePool) {
                 .bind(parsed["e2e_ms"].as_i64())
                 .execute(&pool)
                 .await
-                .map(|_| ())
+                .map(|_| ());
+                if res.is_ok() {
+                    let broadcast = WsBroadcast::NewTrade {
+                        ts_ms: entry.ts_ms,
+                        kind: entry.kind.clone(),
+                        data: parsed.clone(),
+                    };
+                    if let Ok(json) = serde_json::to_string(&broadcast) {
+                        let _ = tx_ws.send(json);
+                    }
+                }
+                res
             }
             _ => Ok(()),
         };
