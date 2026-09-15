@@ -12,16 +12,23 @@ pub mod arbitrage;
 pub mod common;
 pub mod copy_onchain;
 pub mod grid_dca;
+pub mod score;
 pub mod sniper;
 pub mod perps;
 pub mod r#yield;
+
+use std::collections::HashMap;
 
 use alloy::primitives::U256;
 use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, StrategiesCfg};
-use crate::events::{LogEntry, MonitorMsg, StrategyEvent};
+use crate::events::{now_ms, LogEntry, MonitorMsg, StrategyEvent};
 use crate::market::SharedMarketState;
+use crate::metrics::SharedMetrics;
+
+/// Cooldown antar-sinyal untuk pair yang sama (hindari spam sinyal tiap Sync).
+const SIGNAL_COOLDOWN_MS: i64 = 60_000;
 
 /// State global yang di-share ke semua strategi via trait `Strategy`.
 #[allow(dead_code)]
@@ -41,6 +48,8 @@ pub struct SharedState {
     pub tx_monitor: mpsc::Sender<MonitorMsg>,
     /// Channel untuk mengirim Base Network orders ke base executor.
     pub tx_base_order: mpsc::Sender<crate::execution::base_executor::BaseOrder>,
+    /// Metrics pipeline (blueprint §13) — sinyal yang lolos ambang dihitung di sini.
+    pub metrics: SharedMetrics,
 }
 
 /// Trait uniform untuk semua strategi.
@@ -130,6 +139,9 @@ impl StrategyEngine {
             s.start(&self.shared).await;
         }
 
+        // Cooldown sinyal scoring per pool (§5) — hindari spam tiap Sync.
+        let mut last_signal: HashMap<String, i64> = HashMap::new();
+
         while let Some(event) = self.rx_event.recv().await {
             // Normalisasi event -> MarketState SEBELUM strategi membaca
             // (blueprint §4: "event normalization before market engine").
@@ -144,8 +156,55 @@ impl StrategyEngine {
             {
                 let r0 = reserve0.parse::<U256>().unwrap_or(U256::ZERO);
                 let r1 = reserve1.parse::<U256>().unwrap_or(U256::ZERO);
-                let mut m = self.shared.market.write().expect("market lock poisoned");
-                m.on_pool_sync(pool, r0, r1, *ts_ms);
+                // Scope eksplisit: guard write HARUS dilepas sebelum await
+                // (RwLockWriteGuard tidak Send).
+                let snapshot = {
+                    let mut m = self.shared.market.write().expect("market lock poisoned");
+                    m.on_pool_sync(pool, r0, r1, *ts_ms);
+                    m.pool(pool).cloned()
+                };
+
+                // Scoring multi-faktor (blueprint §5): setelah state ter-update,
+                // nilai pool ini; kandidat di atas ambang -> Signal (§11) yang
+                // dicatat ke event bus (§12 `signal.created`). TIDAK auto-buy (§8).
+                if let Some(pool_state) = snapshot {
+                    let last = last_signal.get(&pool_state.pool).copied().unwrap_or(0);
+                    if now_ms().saturating_sub(last) >= SIGNAL_COOLDOWN_MS {
+                        if let Some(candidate) = score::evaluate_candidate(&pool_state) {
+                            last_signal.insert(pool_state.pool.clone(), now_ms());
+                            self.shared.metrics.inc(&self.shared.metrics.signals);
+                            let side = if candidate.factors.momentum >= 50 {
+                                "buy"
+                            } else {
+                                "sell"
+                            };
+                            let payload = serde_json::json!({
+                                "strategy": "market_score",
+                                "pair": candidate.pair,
+                                "pool": candidate.pool,
+                                "side": side,
+                                "score": candidate.score,
+                                "factors": candidate.factors,
+                                "reasons": candidate.reasons,
+                                "ts_ms": candidate.ts_ms,
+                            });
+                            tracing::info!(
+                                pair = %payload["pair"],
+                                score = candidate.score,
+                                "sinyal multi-faktor (§5) — kandidat dicatat, tanpa auto-buy (§8)"
+                            );
+                            let _ = self
+                                .shared
+                                .tx_log
+                                .send(LogEntry {
+                                    ts_ms: candidate.ts_ms,
+                                    kind: "signal_created".into(),
+                                    payload: payload.to_string(),
+                                })
+                                .await;
+                        }
+                    }
+                }
             }
 
             for s in &mut self.strategies {

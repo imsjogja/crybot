@@ -206,6 +206,21 @@ pub async fn run_store(mut rx: mpsc::Receiver<LogEntry>, pool: SqlitePool) {
         // Dual-write ke tabel terstruktur (§12) — best effort.
         let parsed: serde_json::Value = serde_json::from_str(&entry.payload).unwrap_or_default();
         let result = match entry.kind.as_str() {
+            "signal_created" => {
+                sqlx::query(
+                    "INSERT INTO signals (ts_ms, strategy, pair, side, score, reasons)
+                     VALUES (?, ?, ?, ?, ?, ?)",
+                )
+                .bind(entry.ts_ms)
+                .bind(parsed["strategy"].as_str().unwrap_or(""))
+                .bind(parsed["pair"].as_str().unwrap_or(""))
+                .bind(parsed["side"].as_str().unwrap_or(""))
+                .bind(parsed["score"].as_i64().unwrap_or(0))
+                .bind(parsed["reasons"].to_string())
+                .execute(&pool)
+                .await
+                .map(|_| ())
+            }
             "risk_decided" => {
                 sqlx::query(
                     "INSERT INTO risk_decisions (ts_ms, decision, strategy, pair, side, reasons)

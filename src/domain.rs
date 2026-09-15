@@ -72,6 +72,9 @@ pub struct TradeIntent {
     pub score: u8,
     /// Timestamp pembuatan quote/order — dasar pengecekan TTL (§3.5).
     pub quote_ts_ms: i64,
+    /// Price impact estimasi dari quote (persen) — dicek risk engine (§7).
+    /// `None` = belum ada quote (order manual/internal); gate dilewati.
+    pub price_impact_pct: Option<Decimal>,
 }
 
 // ============================================================================
