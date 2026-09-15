@@ -11,6 +11,9 @@ pub struct AppConfig {
     /// paper | testnet | live
     pub mode: Mode,
     pub risk: RiskCfg,
+    /// Simulation layer (blueprint §8).
+    #[serde(default)]
+    pub simulation: SimulationCfg,
     pub monitor: MonitorCfg,
     pub store: StoreCfg,
     #[serde(default)]
@@ -58,6 +61,57 @@ pub struct RiskCfg {
     pub kill_switch_drawdown_pct: Decimal,
     /// false = bot tidak mengirim order apa pun (default aman).
     pub armed: bool,
+    /// Batas nilai maksimum satu transaksi dalam ETH (blueprint §9:
+    /// "max transaction value"). Default 0.05 ETH.
+    #[serde(default = "default_max_tx_value_eth")]
+    pub max_tx_value_eth: Decimal,
+    /// Daftar router/kontrak yang boleh menerima tx (blueprint §9:
+    /// "approved contract/router allowlist"). Kosong = semua router di
+    /// `base.addresses`.
+    #[serde(default)]
+    pub allowed_routers: Vec<String>,
+    /// Izinkan SELL terkontrol saat emergency stop aktif (blueprint §13:
+    /// "controlled SELL/unwind optionally ON"). Default true.
+    #[serde(default = "default_true")]
+    pub allow_sell_during_halt: bool,
+    /// Jumlah error eksekusi beruntun sebelum circuit breaker trip
+    /// dan emergency stop otomatis (blueprint §7/§13). Default 5.
+    #[serde(default = "default_circuit_breaker_errors")]
+    pub circuit_breaker_consecutive_errors: u32,
+}
+
+fn default_max_tx_value_eth() -> Decimal {
+    Decimal::new(5, 2) // 0.05 ETH
+}
+
+fn default_circuit_breaker_errors() -> u32 {
+    5
+}
+
+/// Konfigurasi simulation layer (blueprint §8).
+#[derive(Debug, Clone, Deserialize)]
+pub struct SimulationCfg {
+    /// Jalankan eth_call simulasi sebelum submit tx (blueprint §8:
+    /// "Semua transaksi melalui validation dan simulation"). Default true.
+    #[serde(default = "default_true")]
+    pub pre_submit: bool,
+    /// TTL quote/order dalam milidetik; order lebih tua dari ini ditolak
+    /// (blueprint §3.5: "reject stale quotes"). Default 3000 ms.
+    #[serde(default = "default_quote_ttl_ms")]
+    pub quote_ttl_ms: i64,
+}
+
+impl Default for SimulationCfg {
+    fn default() -> Self {
+        Self {
+            pre_submit: true,
+            quote_ttl_ms: default_quote_ttl_ms(),
+        }
+    }
+}
+
+fn default_quote_ttl_ms() -> i64 {
+    3_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -138,6 +192,13 @@ pub struct BaseCfg {
     pub flashblocks: bool,
     /// MEV-protected RPC untuk tx submission (opsional).
     pub mev_rpc_url: Option<String>,
+    /// Interval polling block HTTP fallback (ms) bila WSS tidak tersedia.
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    /// Umur maksimum market state sebelum dianggap stale (ms) —
+    /// blueprint §4.3 freshness guard.
+    #[serde(default = "default_stale_ms")]
+    pub stale_ms: i64,
     /// Nama env var berisi private key (BUKAN key-nya langsung!).
     pub private_key_env: String,
     /// Alamat kontrak-kontrak penting Base (dengan default).
@@ -195,6 +256,14 @@ impl Default for BaseAddresses {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_poll_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_stale_ms() -> i64 {
+    crate::market::DEFAULT_STALE_MS
 }
 
 // ============================================================================
