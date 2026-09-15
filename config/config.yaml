@@ -50,7 +50,7 @@ web:
 
 # Base Network connection
 base:
-  ws_url: "wss://base-flashblocks.coinbase.com/v1/ws/base"
+  ws_url: "wss://base.publicnode.com"
   http_url: "https://mainnet.base.org"
   flashblocks: true
   mev_rpc_url: null
