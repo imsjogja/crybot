@@ -129,6 +129,11 @@
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2>Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
+        <article class="card full" id="chartCard" style="display: none;">
+          <h2 id="chartTitle">Chart</h2>
+          <div id="chartContainer" style="height: 400px; margin-top: 10px;"></div>
+        </article>
+
         <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
       </div>
     </section>
