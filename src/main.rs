@@ -17,7 +17,9 @@ use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
 use crypto_copy_bot::monitor::telegram::{run_monitor, TelegramAlerter};
 use crypto_copy_bot::store::{self};
 use crypto_copy_bot::strategies::{SharedState, StrategyEngine};
-use crypto_copy_bot::web::{HaltFlag, WebState};
+use crypto_copy_bot::store::{self, run_store};
+use crypto_copy_bot::strategies::{SharedState, StrategyEngine};
+use crypto_copy_bot::web::{self, HaltFlag, WebState};
 
 fn new_halt_flag() -> HaltFlag {
     Arc::new(AtomicBool::new(false))

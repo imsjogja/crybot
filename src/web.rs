@@ -21,7 +21,6 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use rust_decimal::Decimal;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
