@@ -14,6 +14,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
+        Query,
         State,
     },
     http::{HeaderMap, StatusCode},
@@ -21,6 +22,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,6 +71,18 @@ fn unauthorized() -> (StatusCode, Json<Value>) {
         StatusCode::UNAUTHORIZED,
         Json(json!({"error": "token tidak valid atau tidak ada"})),
     )
+}
+
+#[derive(Deserialize)]
+struct WsQuery {
+    token: Option<String>,
+}
+
+fn authorized_ws(st: &WebState, token: &Option<String>) -> bool {
+    match &st.token {
+        None => true,
+        Some(t) => token.as_ref().map(|q| q == t).unwrap_or(false),
+    }
 }
 
 fn fmt_ms(v: Option<i64>) -> String {
@@ -293,10 +307,10 @@ async fn ws_status(socket: WebSocket, st: Shared) {
 
 async fn ws(
     State(st): State<Shared>,
-    headers: HeaderMap,
+    Query(q): Query<WsQuery>,
     upgrade: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if !authorized(&st, &headers) {
+    if !authorized_ws(&st, &q.token) {
         return unauthorized().into_response();
     }
     upgrade.on_upgrade(move |socket| ws_status(socket, st))

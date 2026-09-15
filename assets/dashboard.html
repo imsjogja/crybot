@@ -214,7 +214,16 @@ async function loadAll() {
 }
 function connectWebSocket() {
   if (!('WebSocket' in window)) { setConnection('Polling aktif', 'info'); return; }
-  try { const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; const ws = new WebSocket(`${protocol}//${location.host}/ws`); ws.onopen = () => setConnection('WebSocket terhubung', 'ok'); ws.onmessage = () => loadAll(); ws.onerror = () => setConnection('Polling aktif', 'info'); ws.onclose = () => setConnection('Polling aktif', 'info'); } catch (_) { setConnection('Polling aktif', 'info'); }
+  try {
+    const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const t = token();
+    const wsUrl = `${protocol}//${location.host}/ws${t ? '?token=' + encodeURIComponent(t) : ''}`;
+    const ws = new WebSocket(wsUrl);
+    ws.onopen = () => setConnection('WebSocket terhubung', 'ok');
+    ws.onmessage = () => loadAll();
+    ws.onerror = () => setConnection('Polling aktif', 'info');
+    ws.onclose = () => setConnection('Polling aktif', 'info');
+  } catch (_) { setConnection('Polling aktif', 'info'); }
 }
 async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
 async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); loadAll(); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
