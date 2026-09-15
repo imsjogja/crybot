@@ -119,6 +119,7 @@ async fn main() -> Result<()> {
 
     handles.push(tokio::spawn(strategy_engine.run()));
     handles.push(tokio::spawn(run_store(rx_log, pool.clone(), tx_ws.clone())));
+    let tx_ws_scanner = tx_ws.clone(); handles.push(tokio::spawn(async move { let _ = crypto_copy_bot::monitor::scanner::run_market_scanner(tx_ws_scanner).await; }));
     handles.push(tokio::spawn(run_monitor(rx_monitor, tg.clone())));
 
     if cfg.monitor.commands_enabled {

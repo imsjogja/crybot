@@ -129,6 +129,7 @@
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2>Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
+        <article class="card full"><h2>Market Scanner (Live Tokens)</h2><p>Trending tokens di Base (GeckoTerminal)</p><div id="scannerTable" class="empty">Menunggu data scanner...</div></article>
         <article class="card full" id="chartCard" style="display: none;">
           <h2 id="chartTitle">Chart</h2>
           <div id="chartContainer" style="height: 400px; margin-top: 10px;"></div>
@@ -171,6 +172,29 @@ function setSafetyBanner(status) {
   if (status.halt) { banner.className = 'notice'; banner.innerHTML = '<strong>Halt pengaman aktif.</strong><p>Order baru diblokir. Gunakan “Clear halt” hanya setelah penyebabnya ditinjau.</p>'; banner.style.display = 'block'; return; }
   banner.style.display = 'none';
 }
+function renderScanner(data) {
+  if (!data || !data.data || data.data.length === 0) return;
+  const pools = data.data;
+  const html = `<div class="table-wrap"><table>
+    <thead><tr><th>Token</th><th>Pool</th><th>Price</th><th>Vol 24h</th><th>Action</th></tr></thead>
+    <tbody>${pools.map(p => {
+      const attrs = p.attributes || {};
+      const tokenName = attrs.name || 'Unknown';
+      const price = attrs.base_token_price_usd ? '$' + parseFloat(attrs.base_token_price_usd).toPrecision(4) : '-';
+      const vol = attrs.volume_usd && attrs.volume_usd.h24 ? '$' + parseFloat(attrs.volume_usd.h24).toFixed(0) : '-';
+      const poolAddr = attrs.address || '';
+      const baseTokenAddr = p.relationships && p.relationships.base_token && p.relationships.base_token.data ? p.relationships.base_token.data.id : '';
+      const addr = baseTokenAddr.includes('_') ? baseTokenAddr.split('_')[1] : baseTokenAddr;
+      return `<tr>
+        <td><strong>${esc(tokenName)}</strong></td>
+        <td class="muted">${esc(poolAddr.substring(0,6) + '...' + poolAddr.substring(poolAddr.length-4))}</td>
+        <td>${esc(price)}</td>
+        <td>${esc(vol)}</td>
+        <td><a href="javascript:void(0)" onclick="showChart('${esc(addr)}/WETH')" class="btn" style="padding:0.25rem 0.5rem">Chart</a></td>
+      </tr>`;
+    }).join('')}</tbody></table></div>`;
+  $('scannerTable').innerHTML = html;
+}
 function renderStatus(s) {
   const mode = String(s.mode || '—'); const live = mode.toLowerCase() === 'live'; const armed = Boolean(s.armed); const halted = Boolean(s.halt);
   $('modeBadge').textContent = `${mode.toUpperCase()} MODE`; $('modeBadge').className = `badge ${live ? 'bad' : mode.toLowerCase() === 'testnet' ? 'warn' : 'info'}`;
@@ -185,7 +209,7 @@ function renderStatus(s) {
   const metrics = s.metrics || {}; $('mOrders').textContent = esc(metrics.orders ?? '—'); $('mFills').textContent = esc(metrics.fills ?? '—'); $('mErrors').innerHTML = num(metrics.errors) ? `<span class="neg">${esc(metrics.errors)}</span>` : '0';
   $('latE2e').textContent = `${esc(metrics.e2e_p50)} / ${esc(metrics.e2e_p95)} / ${esc(metrics.e2e_p99)}`;
   const strategies = Array.isArray(s.strategies) ? s.strategies : []; const active = strategies.filter(x => x.enabled).map(x => x.name);
-  $('strategyCount').textContent = active.length; $('strategyList').textContent = active.length ? active.join(', ') : 'Tidak ada strategi aktif';
+  $('strategyCount').textContent = active.length; $('strategyList').innerHTML = active.length ? active.map(n => `<span style="color:var(--green)">&#9679;</span> ${esc(n)}`).join(', ') : 'Tidak ada strategi aktif';
   $('copySummary').textContent = `${metrics.orders ?? 0} order, ${metrics.fills ?? 0} fill, ${metrics.errors ?? 0} error.`;
   setSafetyBanner(s);
 }
@@ -256,6 +280,9 @@ function connectWebSocket() {
         try {
           const msg = JSON.parse(event.data);
           switch (msg.type) {
+            case 'MarketScannerUpdate':
+              renderScanner(msg.data);
+              break;
             case 'Init':
               renderStatus(msg.status);
               renderTrades(msg.trades);
