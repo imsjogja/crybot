@@ -26,7 +26,7 @@ struct Reserves {
 /// Strategi untuk mendeteksi, bukan mengeksekusi, peluang arbitrase antar pool.
 pub struct ArbitrageStrategy {
     cfg: ArbitrageCfg,
-    reserves: HashMap<String, Reserves>,
+    reserves: HashMap<Address, Reserves>,
 }
 
 impl ArbitrageStrategy {
@@ -38,33 +38,27 @@ impl ArbitrageStrategy {
         }
     }
 
-    fn pool_key(address: &str) -> String {
-        address.to_ascii_lowercase()
-    }
-
     fn same_token_pair(left: &PoolCfg, right: &PoolCfg) -> bool {
-        (left.token0.eq_ignore_ascii_case(&right.token0)
-            && left.token1.eq_ignore_ascii_case(&right.token1))
-            || (left.token0.eq_ignore_ascii_case(&right.token1)
-                && left.token1.eq_ignore_ascii_case(&right.token0))
+        (left.token0 == right.token0 && left.token1 == right.token1)
+            || (left.token0 == right.token1 && left.token1 == right.token0)
     }
 
-    fn price_in_token0(pool: &PoolCfg, reserves: Reserves) -> Option<Decimal> {
+    fn price_in_token0(_pool: &PoolCfg, reserves: Reserves) -> Option<Decimal> {
         if reserves.reserve0.is_zero() || reserves.reserve1.is_zero() {
             return None;
         }
         let direct = decimal_from_u256(reserves.reserve1)? / decimal_from_u256(reserves.reserve0)?;
-        if pool.token0.is_empty() || pool.token1.is_empty() || direct <= Decimal::ZERO {
+        if direct <= Decimal::ZERO {
             return None;
         }
         Some(direct)
     }
 
-    fn normalized_price(pool: &PoolCfg, reserves: Reserves, token0: &str) -> Option<Decimal> {
+    fn normalized_price(pool: &PoolCfg, reserves: Reserves, token0: &Address) -> Option<Decimal> {
         let price = Self::price_in_token0(pool, reserves)?;
-        if pool.token0.eq_ignore_ascii_case(token0) {
+        if pool.token0 == *token0 {
             Some(price)
-        } else if pool.token1.eq_ignore_ascii_case(token0) {
+        } else if pool.token1 == *token0 {
             if price.is_zero() {
                 None
             } else {
@@ -93,38 +87,21 @@ impl ArbitrageStrategy {
 
     async fn handle_pool_sync(
         &mut self,
-        pool_address: &str,
+        pool_address: Address,
         reserve0: &str,
         reserve1: &str,
         state: &SharedState,
     ) {
         let ctx = StrategyContext::new(self.name(), StrategySource::Arbitrage, state);
-        let key = Self::pool_key(pool_address);
         let Some(changed_pool) = self
             .cfg
             .monitored_pools
             .iter()
-            .find(|pool| Self::pool_key(&pool.address) == key)
+            .find(|pool| pool.address == pool_address)
             .cloned()
         else {
             return;
         };
-        if changed_pool.address.parse::<Address>().is_err() {
-            ctx.log(
-                "arbitrage_pool_config_invalid",
-                format!(
-                    "pool={pool_address} configured_address={}",
-                    changed_pool.address
-                ),
-            )
-            .await;
-            ctx.alert(MonitorMsg::Warning(format!(
-                "Arbitrase melewati pool {pool_address}: alamat pool tidak valid"
-            )))
-            .await;
-            return;
-        }
-
         let (Ok(reserve0), Ok(reserve1)) = (U256::from_str(reserve0), U256::from_str(reserve1))
         else {
             ctx.log(
@@ -144,22 +121,22 @@ impl ArbitrageStrategy {
             return;
         }
 
-        self.reserves.insert(key, Reserves { reserve0, reserve1 });
+        self.reserves.insert(pool_address, Reserves { reserve0, reserve1 });
         let Some(changed_reserves) = self
             .reserves
-            .get(&Self::pool_key(&changed_pool.address))
+            .get(&changed_pool.address)
             .copied()
         else {
             return;
         };
 
         for other_pool in self.cfg.monitored_pools.iter().filter(|other| {
-            Self::pool_key(&other.address) != Self::pool_key(&changed_pool.address)
+            other.address != changed_pool.address
                 && Self::same_token_pair(&changed_pool, other)
         }) {
             let Some(other_reserves) = self
                 .reserves
-                .get(&Self::pool_key(&other_pool.address))
+                .get(&other_pool.address)
                 .copied()
             else {
                 continue;
@@ -228,7 +205,7 @@ impl Strategy for ArbitrageStrategy {
             ..
         } = event
         {
-            self.handle_pool_sync(pool, reserve0, reserve1, state).await;
+            self.handle_pool_sync(*pool, reserve0, reserve1, state).await;
         }
     }
 
@@ -259,27 +236,27 @@ fn decimal_from_u256(value: U256) -> Option<Decimal> {
 mod tests {
     use super::*;
 
-    fn pool(address: &str, token0: &str, token1: &str, fee_bps: u32) -> PoolCfg {
+    fn pool(address: Address, token0: Address, token1: Address, fee_bps: u32) -> PoolCfg {
         PoolCfg {
-            address: address.into(),
+            address,
             dex: "dex".into(),
-            token0: token0.into(),
-            token1: token1.into(),
+            token0,
+            token1,
             fee_bps,
         }
     }
 
     #[test]
     fn pairs_match_with_reversed_token_order() {
-        let left = pool("0x1", "WETH", "USDC", 30);
-        let right = pool("0x2", "usdc", "weth", 30);
+        let left = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
+        let right = pool("0x0000000000000000000000000000000000000004".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), 30);
         assert!(ArbitrageStrategy::same_token_pair(&left, &right));
     }
 
     #[test]
     fn profit_requires_positive_spread_after_fees() {
-        let buy = pool("0x1", "WETH", "USDC", 30);
-        let sell = pool("0x2", "WETH", "USDC", 30);
+        let buy = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
+        let sell = pool("0x0000000000000000000000000000000000000004".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
         assert_eq!(
             ArbitrageStrategy::estimated_profit(
                 &buy,
@@ -300,13 +277,13 @@ mod tests {
 
     #[test]
     fn normalizes_reversed_pool_price() {
-        let reversed = pool("0x1", "USDC", "WETH", 30);
+        let reversed = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), 30);
         let reserves = Reserves {
             reserve0: U256::from(2_000u64),
             reserve1: U256::from(1u64),
         };
         assert_eq!(
-            ArbitrageStrategy::normalized_price(&reversed, reserves, "WETH"),
+            ArbitrageStrategy::normalized_price(&reversed, reserves, &"0x0000000000000000000000000000000000000002".parse().unwrap()),
             Some(Decimal::from(2_000))
         );
     }

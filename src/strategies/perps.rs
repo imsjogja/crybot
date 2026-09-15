@@ -63,13 +63,6 @@ impl PerpsStrategy {
         }
         None
     }
-
-    fn parse_configured_address(label: &str, value: Option<&String>) -> Result<Address, String> {
-        let value = value.ok_or_else(|| format!("alamat {label} belum dikonfigurasi"))?;
-        value
-            .parse::<Address>()
-            .map_err(|error| format!("alamat {label} tidak valid ({value}): {error}"))
-    }
 }
 
 #[async_trait::async_trait]
@@ -83,7 +76,11 @@ impl Strategy for PerpsStrategy {
     }
 
     async fn on_event(&mut self, event: &StrategyEvent, state: &SharedState) {
-        let StrategyEvent::PriceTick { pair, price, ts_ms } = event else {
+        let StrategyEvent::PriceTick { pair, price, ts_ms: _ } = event else {
+            return;
+        };
+
+        let Ok(pair_address) = pair.parse::<Address>() else {
             return;
         };
 
@@ -92,7 +89,7 @@ impl Strategy for PerpsStrategy {
             .cfg
             .positions
             .iter()
-            .filter(|position| position.market == *pair)
+            .filter(|position| position.market == pair_address)
         {
             if !Self::leverage_is_valid(position.leverage, self.cfg.max_leverage) {
                 let message = format!(
@@ -119,7 +116,7 @@ impl Strategy for PerpsStrategy {
                 market = %position.market,
                 price = %price,
                 long = position.is_long,
-                trigger_ts_ms = ts_ms,
+                trigger_ts_ms = crate::events::now_ms(),
                 threshold = threshold_name,
                 "ambang posisi perps tercapai; hanya alert"
             );
@@ -132,21 +129,20 @@ impl Strategy for PerpsStrategy {
 
     async fn start(&mut self, state: &SharedState) {
         let context = StrategyContext::new(self.name(), StrategySource::Perps, state);
-        let router =
-            Self::parse_configured_address("exchange_router", self.cfg.exchange_router.as_ref());
+        let router = self
+            .cfg
+            .exchange_router
+            .ok_or_else(|| "alamat exchange_router belum dikonfigurasi".to_string());
         if let Err(message) = router {
             tracing::warn!(%message, "konfigurasi perps tidak aman");
             context.log("perps_config_warning", message.clone()).await;
             context.alert(MonitorMsg::Warning(message)).await;
         }
 
-        if self.cfg.reader.is_some() {
-            if let Err(message) = Self::parse_configured_address("reader", self.cfg.reader.as_ref())
-            {
-                tracing::warn!(%message, "konfigurasi perps tidak aman");
-                context.log("perps_config_warning", message.clone()).await;
-                context.alert(MonitorMsg::Warning(message)).await;
-            }
+        if self.cfg.reader.is_none() {
+            // ...
+        } else {
+            // Already an Address so it's valid
         }
 
         let mut valid_positions = 0usize;
@@ -192,8 +188,8 @@ mod tests {
         take_profit: Option<i64>,
     ) -> PerpsPositionCfg {
         PerpsPositionCfg {
-            market: "ETH/USD".into(),
-            collateral_token: "USDC".into(),
+            market: Address::repeat_byte(0xee),
+            collateral_token: Address::repeat_byte(0xcc),
             size_usd: Decimal::ONE,
             is_long,
             leverage: 2,

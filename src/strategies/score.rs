@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use crate::events::now_ms;
 use crate::market::PoolState;
 
+use alloy::primitives::Address;
+
 /// Bobot faktor (blueprint §5.2) — jumlah harus 100.
 pub const W_MOMENTUM: u32 = 25;
 pub const W_VOLUME: u32 = 20;
@@ -162,7 +164,7 @@ pub fn score_pool(pool: &PoolState, now: i64) -> (u8, FactorScores, Vec<String>)
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoredCandidate {
     pub pair: String,
-    pub pool: String,
+    pub pool: Address,
     pub score: u8,
     pub factors: FactorScores,
     pub reasons: Vec<String>,
@@ -178,7 +180,7 @@ pub fn evaluate_candidate_at(pool: &PoolState, now: i64) -> Option<ScoredCandida
     }
     Some(ScoredCandidate {
         pair: format!("{}/{}", pool.token0, pool.token1),
-        pool: pool.pool.clone(),
+        pool: pool.pool,
         score,
         factors,
         reasons,
@@ -203,9 +205,9 @@ mod tests {
             .map(|(_, p)| *p)
             .unwrap_or(Decimal::ZERO);
         PoolState {
-            pool: "0xpool".into(),
-            token0: "0xWETH".into(),
-            token1: "0xTKN".into(),
+            pool: Address::repeat_byte(0x11),
+            token0: Address::repeat_byte(0xaa),
+            token1: Address::repeat_byte(0xbb),
             dex: "aerodrome".into(),
             reserve0: U256::from(1_000_000u64),
             reserve1: U256::from(500_000u64),
@@ -280,9 +282,9 @@ mod tests {
     #[test]
     fn pool_sepi_bukan_kandidat() {
         let p = PoolState {
-            pool: "0xpool".into(),
-            token0: "0xWETH".into(),
-            token1: "0xTKN".into(),
+            pool: Address::repeat_byte(0x11),
+            token0: Address::repeat_byte(0xaa),
+            token1: Address::repeat_byte(0xbb),
             dex: "aerodrome".into(),
             reserve0: U256::ZERO,
             reserve1: U256::ZERO,

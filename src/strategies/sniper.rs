@@ -20,7 +20,7 @@ const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
 /// Strategi pemantau pool baru dengan deduplikasi per alamat pool.
 pub struct SniperStrategy {
     cfg: SniperCfg,
-    seen_pools: HashSet<String>,
+    seen_pools: HashSet<Address>,
 }
 
 impl SniperStrategy {
@@ -31,8 +31,8 @@ impl SniperStrategy {
         }
     }
 
-    fn pool_is_new(&mut self, pool: &str) -> bool {
-        self.seen_pools.insert(normalize(pool))
+    fn pool_is_new(&mut self, pool: Address) -> bool {
+        self.seen_pools.insert(pool)
     }
 }
 
@@ -59,7 +59,7 @@ impl Strategy for SniperStrategy {
         };
 
         let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
-        if !self.pool_is_new(pool) {
+        if !self.pool_is_new(*pool) {
             tracing::debug!(pool = %pool, "pool baru duplikat diabaikan");
             ctx.log("sniper_skip_duplicate", format!(r#"{{"pool":"{pool}"}}"#))
                 .await;
@@ -69,23 +69,6 @@ impl Strategy for SniperStrategy {
         if !self.cfg.enabled {
             ctx.log("sniper_skip_disabled", format!(r#"{{"pool":"{pool}"}}"#))
                 .await;
-            return;
-        }
-
-        if pool.parse::<Address>().is_err()
-            || token0.parse::<Address>().is_err()
-            || token1.parse::<Address>().is_err()
-        {
-            tracing::warn!(%pool, %token0, %token1, "event pool memiliki address tidak valid");
-            ctx.log(
-                "sniper_skip_invalid_address",
-                format!(r#"{{"pool":"{pool}","token0":"{token0}","token1":"{token1}"}}"#),
-            )
-            .await;
-            ctx.alert(MonitorMsg::Warning(format!(
-                "SNIPER: pool {pool} diabaikan karena address pool/token tidak valid"
-            )))
-            .await;
             return;
         }
 
@@ -170,17 +153,14 @@ impl Strategy for SniperStrategy {
     }
 }
 
-fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
 
 /// Payload `signal_created` untuk kandidat sniper — disimpan store ke tabel
 /// `signals` (§12) dan ditampilkan dashboard via `/api/signals`.
-fn candidate_signal_payload(pool: &str, pair: &str, dex: &str) -> String {
+fn candidate_signal_payload(pool: &Address, pair: &str, dex: &str) -> String {
     serde_json::json!({
         "strategy": "sniper",
         "pair": pair,
-        "pool": pool,
+        "pool": pool.to_string(),
         "side": "buy",
         "score": 0,
         "reasons": [
@@ -191,22 +171,18 @@ fn candidate_signal_payload(pool: &str, pair: &str, dex: &str) -> String {
     .to_string()
 }
 
-fn factory_config_is_valid(allowlist: &[String]) -> bool {
-    allowlist
-        .iter()
-        .all(|factory| factory.parse::<Address>().is_ok())
+fn factory_config_is_valid(_allowlist: &[Address]) -> bool {
+    true
 }
 
-fn factory_allowed(dex: &str, allowlist: &[String]) -> bool {
-    allowlist.is_empty()
-        || allowlist
-            .iter()
-            .any(|factory| normalize(factory) == normalize(dex))
+fn factory_allowed(dex: &str, allowlist: &[Address]) -> bool {
+    let Ok(dex_addr) = dex.parse::<Address>() else { return false; };
+    allowlist.is_empty() || allowlist.contains(&dex_addr)
 }
 
-fn is_weth_pair(token0: &str, token1: &str) -> bool {
-    let weth = normalize(WETH_BASE);
-    normalize(token0) == weth || normalize(token1) == weth
+fn is_weth_pair(token0: &Address, token1: &Address) -> bool {
+    let weth = WETH_BASE.parse::<Address>().unwrap();
+    token0 == &weth || token1 == &weth
 }
 
 #[cfg(test)]
@@ -218,43 +194,39 @@ mod tests {
         let factory = "0x1111111111111111111111111111111111111111";
         assert!(factory_allowed(
             "0x1111111111111111111111111111111111111111",
-            &[factory.into()]
+            &[factory.parse().unwrap()]
         ));
         assert!(!factory_allowed(
             "0x2222222222222222222222222222222222222222",
-            &[factory.into()]
+            &[factory.parse().unwrap()]
         ));
-        assert!(factory_allowed("apa-pun", &[]));
-        assert!(factory_config_is_valid(&[factory.into()]));
-        assert!(!factory_config_is_valid(&["bukan-address".into()]));
+        assert!(factory_allowed("0x3333333333333333333333333333333333333333", &[]));
+        assert!(factory_config_is_valid(&[factory.parse().unwrap()]));
     }
 
     #[test]
     fn weth_pair_accepts_either_position() {
-        assert!(is_weth_pair(
-            WETH_BASE,
-            "0x1111111111111111111111111111111111111111"
-        ));
-        assert!(is_weth_pair(
-            "0x1111111111111111111111111111111111111111",
-            WETH_BASE
-        ));
-        assert!(!is_weth_pair(
-            "0x1111111111111111111111111111111111111111",
-            "0x2222222222222222222222222222222222222222"
-        ));
+        let weth: Address = WETH_BASE.parse().unwrap();
+        let other: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        let other2: Address = "0x2222222222222222222222222222222222222222".parse().unwrap();
+        assert!(is_weth_pair(&weth, &other));
+        assert!(is_weth_pair(&other, &weth));
+        assert!(!is_weth_pair(&other, &other2));
     }
 
     #[test]
     fn pool_deduplication_uses_normalized_address() {
         let mut strategy = SniperStrategy::new(SniperCfg::default());
-        assert!(strategy.pool_is_new("0xAbC"));
-        assert!(!strategy.pool_is_new(" 0xabc "));
+        let addr1: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        let addr2: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        assert!(strategy.pool_is_new(addr1));
+        assert!(!strategy.pool_is_new(addr2));
     }
 
     #[test]
     fn payload_sinyal_kandidat_memuat_field_wajib() {
-        let payload = candidate_signal_payload("0xpool", "0xWETH/0xTKN", "aerodrome");
+        let pool: Address = Address::repeat_byte(0x11);
+        let payload = candidate_signal_payload(&pool, "0xWETH/0xTKN", "aerodrome");
         let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
         assert_eq!(parsed["strategy"], "sniper");
         assert_eq!(parsed["pair"], "0xWETH/0xTKN");

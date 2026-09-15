@@ -1,6 +1,7 @@
 //! Konfigurasi — dimuat dari config/config.yaml + environment (.env).
 //! Prinsip: parameter non-rahasia di YAML, rahasia hanya via env var.
 
+use alloy::primitives::Address;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use serde::Deserialize;
@@ -69,7 +70,7 @@ pub struct RiskCfg {
     /// "approved contract/router allowlist"). Kosong = semua router di
     /// `base.addresses`.
     #[serde(default)]
-    pub allowed_routers: Vec<String>,
+    pub allowed_routers: Vec<Address>,
     /// Izinkan SELL terkontrol saat emergency stop aktif (blueprint §13:
     /// "controlled SELL/unwind optionally ON"). Default true.
     #[serde(default = "default_true")]
@@ -224,49 +225,49 @@ pub struct BaseCfg {
 /// Alamat kontrak penting di Base Network (default mainnet).
 #[derive(Debug, Clone, Deserialize)]
 pub struct BaseAddresses {
-    pub weth: String,
-    pub gas_oracle: String,
-    pub aerodrome_router: String,
-    pub aerodrome_pool_factory: String,
-    pub aerodrome_slipstream_router: String,
-    pub aerodrome_nft_manager: String,
-    pub uniswap_v3_router: String,
-    pub uniswap_v2_factory: String,
-    pub uniswap_v3_factory: String,
-    pub uniswap_v3_nft_manager: String,
-    pub baseswap_router: String,
-    pub baseswap_factory: String,
-    pub sushiswap_router: String,
-    pub pancakeswap_v3_router: String,
-    pub aero_token: String,
-    pub ve_aero: String,
-    pub voter: String,
-    pub minter: String,
-    pub aave_v3_pool: String,
+    pub weth: Address,
+    pub gas_oracle: Address,
+    pub aerodrome_router: Address,
+    pub aerodrome_pool_factory: Address,
+    pub aerodrome_slipstream_router: Address,
+    pub aerodrome_nft_manager: Address,
+    pub uniswap_v3_router: Address,
+    pub uniswap_v2_factory: Address,
+    pub uniswap_v3_factory: Address,
+    pub uniswap_v3_nft_manager: Address,
+    pub baseswap_router: Address,
+    pub baseswap_factory: Address,
+    pub sushiswap_router: Address,
+    pub pancakeswap_v3_router: Address,
+    pub aero_token: Address,
+    pub ve_aero: Address,
+    pub voter: Address,
+    pub minter: Address,
+    pub aave_v3_pool: Address,
 }
 
 impl Default for BaseAddresses {
     fn default() -> Self {
         Self {
-            weth: "0x4200000000000000000000000000000000000006".into(),
-            gas_oracle: "0x420000000000000000000000000000000000000F".into(),
-            aerodrome_router: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43".into(),
-            aerodrome_pool_factory: "0x420DD381b31aEf6683db6B902084cB0FFECe40Da".into(),
-            aerodrome_slipstream_router: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5".into(),
-            aerodrome_nft_manager: "0x827922686190790b37229fd06084350e74485b72".into(),
-            uniswap_v3_router: "0x2626664c2603336E57B271c5C0b26F421741e481".into(),
-            uniswap_v2_factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6".into(),
-            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31f984".into(),
-            uniswap_v3_nft_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".into(),
-            baseswap_router: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86".into(),
-            baseswap_factory: "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB".into(),
-            sushiswap_router: "0xFB7eF6660F5950E02F0F6daCf63e9465d4d449b9".into(),
-            pancakeswap_v3_router: "0x678aa4bf4e210cf2166753e054d5b7c31cc7fa86".into(),
-            aero_token: "0x940181a94A35A4569E4529A3CDfB74e38FD98631".into(),
-            ve_aero: "0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4".into(),
-            voter: "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5".into(),
-            minter: "0xeB018363F0a9Af8f91F06FEe6613a751b2A33FE5".into(),
-            aave_v3_pool: "0xA238dD80c259a72e81D7e4664a9801593F98d1C5".into(),
+            weth: "0x4200000000000000000000000000000000000006".parse().unwrap(),
+            gas_oracle: "0x420000000000000000000000000000000000000F".parse().unwrap(),
+            aerodrome_router: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43".parse().unwrap(),
+            aerodrome_pool_factory: "0x420DD381b31aEf6683db6B902084cB0FFECe40Da".parse().unwrap(),
+            aerodrome_slipstream_router: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5".parse().unwrap(),
+            aerodrome_nft_manager: "0x827922686190790b37229fd06084350e74485b72".parse().unwrap(),
+            uniswap_v3_router: "0x2626664c2603336E57B271c5C0b26F421741e481".parse().unwrap(),
+            uniswap_v2_factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6".parse().unwrap(),
+            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31f984".parse().unwrap(),
+            uniswap_v3_nft_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".parse().unwrap(),
+            baseswap_router: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86".parse().unwrap(),
+            baseswap_factory: "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB".parse().unwrap(),
+            sushiswap_router: "0xFB7eF6660F5950E02F0F6daCf63e9465d4d449b9".parse().unwrap(),
+            pancakeswap_v3_router: "0x678aa4bf4e210cf2166753e054d5b7c31cc7fa86".parse().unwrap(),
+            aero_token: "0x940181a94A35A4569E4529A3CDfB74e38FD98631".parse().unwrap(),
+            ve_aero: "0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4".parse().unwrap(),
+            voter: "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5".parse().unwrap(),
+            minter: "0xeB018363F0a9Af8f91F06FEe6613a751b2A33FE5".parse().unwrap(),
+            aave_v3_pool: "0xA238dD80c259a72e81D7e4664a9801593F98d1C5".parse().unwrap(),
         }
     }
 }
@@ -308,7 +309,7 @@ pub struct SniperCfg {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
-    pub dex_factories: Vec<String>,
+    pub dex_factories: Vec<Address>,
     pub max_buy_eth: Decimal,
     pub min_liquidity_eth: Decimal,
     pub auto_tp_pct: Decimal,
@@ -386,7 +387,7 @@ impl Default for CopyOnChainCfg {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WalletTargetCfg {
-    pub address: String,
+    pub address: Address,
     pub label: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
@@ -423,24 +424,24 @@ pub struct GridDcaCfg {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GridCfg {
-    pub token_in: String,
-    pub token_out: String,
+    pub token_in: Address,
+    pub token_out: Address,
     pub pair: String,
     pub upper_price: Decimal,
     pub lower_price: Decimal,
     pub grid_count: u32,
     pub amount_per_grid: Decimal,
-    pub dex_router: String,
+    pub dex_router: Address,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DcaCfg {
-    pub token_in: String,
-    pub token_out: String,
+    pub token_in: Address,
+    pub token_out: Address,
     pub pair: String,
     pub interval_secs: u64,
     pub amount: Decimal,
-    pub dex_router: String,
+    pub dex_router: Address,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -475,10 +476,10 @@ fn default_max_gas_gwei() -> u64 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PoolCfg {
-    pub address: String,
+    pub address: Address,
     pub dex: String,
-    pub token0: String,
-    pub token1: String,
+    pub token0: Address,
+    pub token1: Address,
     #[serde(default)]
     pub fee_bps: u32,
 }
@@ -515,7 +516,7 @@ fn default_min_fee_threshold() -> Decimal {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PositionCfg {
-    pub pool: String,
+    pub pool: Address,
     pub token_id: u64,
     #[serde(default)]
     pub lower_tick: Option<i32>,
@@ -531,8 +532,8 @@ pub struct PerpsCfg {
     pub enabled: bool,
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
-    pub exchange_router: Option<String>,
-    pub reader: Option<String>,
+    pub exchange_router: Option<Address>,
+    pub reader: Option<Address>,
     #[serde(default)]
     pub positions: Vec<PerpsPositionCfg>,
 }
@@ -555,8 +556,8 @@ fn default_max_leverage() -> u32 {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PerpsPositionCfg {
-    pub market: String,
-    pub collateral_token: String,
+    pub market: Address,
+    pub collateral_token: Address,
     pub size_usd: Decimal,
     #[serde(default)]
     pub is_long: bool,

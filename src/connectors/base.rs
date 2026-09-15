@@ -261,7 +261,7 @@ impl BaseConnector {
                         {
                             let mut m = market.write().expect("market lock poisoned");
                             if let StrategyEvent::NewPool { pool, token0, token1, dex, ts_ms } = &event {
-                                m.on_new_pool(pool, token0, token1, dex, *ts_ms);
+                                m.on_new_pool(*pool, *token0, *token1, dex, *ts_ms);
                             }
                         }
                         metrics.inc(&metrics.signals);
@@ -295,9 +295,9 @@ impl BaseConnector {
             // Uniswap V3: topics[3] = fee, bukan pool — belum didukung.
             return None;
         };
-        let token0 = format!("{}", Address::from_word(topics[1]));
-        let token1 = format!("{}", Address::from_word(topics[2]));
-        let pool = format!("{}", Address::from_word(topics[3]));
+        let token0 = Address::from_word(topics[1]);
+        let token1 = Address::from_word(topics[2]);
+        let pool = Address::from_word(topics[3]);
         Some(StrategyEvent::NewPool {
             pool,
             token0,
@@ -310,15 +310,12 @@ impl BaseConnector {
     /// Alamat factory yang diawasi: dari config sniper + default BaseAddresses.
     fn factory_addresses(&self) -> Vec<Address> {
         let a = &self.config.addresses;
-        [
-            a.aerodrome_pool_factory.as_str(),
-            a.uniswap_v2_factory.as_str(),
-            a.uniswap_v3_factory.as_str(),
-            a.baseswap_factory.as_str(),
+        vec![
+            a.aerodrome_pool_factory,
+            a.uniswap_v2_factory,
+            a.uniswap_v3_factory,
+            a.baseswap_factory,
         ]
-        .iter()
-        .filter_map(|s| s.parse::<Address>().ok())
-        .collect()
     }
 
     /// Feed polling HTTP (fallback) — NewBlock + pemindaian logs factory
@@ -453,7 +450,7 @@ impl BaseConnector {
             } = &event
             {
                 let mut m = market.write().expect("market lock poisoned");
-                m.on_new_pool(pool, token0, token1, dex, *ts_ms);
+                m.on_new_pool(*pool, *token0, *token1, dex, *ts_ms);
             }
             metrics.inc(&metrics.signals);
             tracing::info!(from, to, "pool baru terdeteksi via polling HTTP");

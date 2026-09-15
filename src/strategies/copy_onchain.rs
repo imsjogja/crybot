@@ -29,7 +29,7 @@ impl CopyOnChainStrategy {
     }
 
     fn tx_is_new(&mut self, tx_hash: &str) -> bool {
-        self.seen_tx_hashes.insert(normalize(tx_hash))
+        self.seen_tx_hashes.insert(tx_hash.trim().to_ascii_lowercase())
     }
 }
 
@@ -101,8 +101,8 @@ impl Strategy for CopyOnChainStrategy {
             return;
         }
 
-        if to.parse::<Address>().is_err() {
-            tracing::warn!(%tx_hash, router = %to, "router tujuan tidak valid");
+        if to.is_zero() {
+            tracing::warn!(%tx_hash, router = %to, "router tujuan tidak valid (zero address)");
             ctx.log(
                 "copy_onchain_skip_invalid_router",
                 format!(r#"{{"tx_hash":"{tx_hash}","router":"{to}"}}"#),
@@ -156,17 +156,13 @@ impl Strategy for CopyOnChainStrategy {
     }
 }
 
-fn normalize(value: &str) -> String {
-    value.trim().to_ascii_lowercase()
-}
-
 fn matching_target<'a>(
-    wallet: &str,
+    wallet: &Address,
     targets: &'a [WalletTargetCfg],
 ) -> Option<&'a WalletTargetCfg> {
     targets
         .iter()
-        .find(|target| target.enabled && normalize(&target.address) == normalize(wallet))
+        .find(|target| target.enabled && &target.address == wallet)
 }
 
 fn value_in_limits(value: Decimal, target: &WalletTargetCfg, cfg: &CopyOnChainCfg) -> bool {
@@ -189,9 +185,9 @@ fn decode_calldata(raw: &str) -> Option<Vec<u8>> {
 mod tests {
     use super::*;
 
-    fn target(address: &str) -> WalletTargetCfg {
+    fn target(address: Address) -> WalletTargetCfg {
         WalletTargetCfg {
-            address: address.into(),
+            address,
             label: "uji".into(),
             enabled: true,
             copy_ratio: Decimal::ONE,
@@ -202,14 +198,15 @@ mod tests {
 
     #[test]
     fn matches_enabled_wallet_case_insensitively() {
-        let targets = vec![target("0xAbC")];
-        assert!(matching_target(" 0xabc ", &targets).is_some());
-        assert!(matching_target("0xdef", &targets).is_none());
+        let addr = Address::repeat_byte(0xaa);
+        let targets = vec![target(addr)];
+        assert!(matching_target(&addr, &targets).is_some());
+        assert!(matching_target(&Address::repeat_byte(0xbb), &targets).is_none());
     }
 
     #[test]
     fn enforces_target_and_global_value_limits() {
-        let target = target("0xabc");
+        let target = target(Address::repeat_byte(0xaa));
         let cfg = CopyOnChainCfg {
             min_tx_eth: Decimal::new(5, 2),
             max_tx_eth: Decimal::new(5, 1),

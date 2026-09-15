@@ -131,14 +131,14 @@ mod tests {
             min_fee_threshold_eth: Decimal::new(1, 3),
             positions: vec![
                 PositionCfg {
-                    pool: "pool-disabled".into(),
+                    pool: alloy::primitives::Address::repeat_byte(0x11),
                     token_id: 1,
                     lower_tick: None,
                     upper_tick: None,
                     auto_compound: false,
                 },
                 PositionCfg {
-                    pool: "pool-enabled".into(),
+                    pool: alloy::primitives::Address::repeat_byte(0x22),
                     token_id: 2,
                     lower_tick: None,
                     upper_tick: None,
@@ -155,7 +155,7 @@ mod tests {
         assert!(strategy.auto_compound_position(1).is_none());
         assert_eq!(
             strategy.auto_compound_position(2).unwrap().pool,
-            "pool-enabled"
+            alloy::primitives::Address::repeat_byte(0x22)
         );
         assert!(strategy.auto_compound_position(3).is_none());
     }

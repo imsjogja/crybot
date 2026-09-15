@@ -1,6 +1,7 @@
 //! Tipe event inti untuk Base Network bot.
 //! Semua event immutable, bertimestamp (epoch ms).
 
+use alloy::primitives::Address;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -67,24 +68,24 @@ impl std::fmt::Display for StrategySource {
 pub enum StrategyEvent {
     /// Token/pool baru terdeteksi (PairCreated/PoolCreated).
     NewPool {
-        pool: String,
-        token0: String,
-        token1: String,
+        pool: Address,
+        token0: Address,
+        token1: Address,
         dex: String,
         ts_ms: i64,
     },
     /// Tx wallet target terdeteksi (copy trading on-chain).
     WalletTx {
-        wallet: String,
+        wallet: Address,
         tx_hash: String,
-        to: String,
+        to: Address,
         calldata_hex: String,
         value_eth: Decimal,
         ts_ms: i64,
     },
     /// Pool reserves update (Sync event).
     PoolSync {
-        pool: String,
+        pool: Address,
         reserve0: String,
         reserve1: String,
         ts_ms: i64,

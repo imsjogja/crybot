@@ -6,7 +6,6 @@
 
 use std::collections::HashMap;
 
-use alloy::primitives::Address;
 use async_trait::async_trait;
 use rust_decimal::Decimal;
 
@@ -135,18 +134,6 @@ impl GridDcaStrategy {
             if !matches_dca_trigger(plan, amount) {
                 continue;
             }
-            if plan.dex_router.parse::<Address>().is_err() {
-                ctx.log(
-                    "dca_config_invalid",
-                    format!("pair={pair} router={}", plan.dex_router),
-                )
-                .await;
-                ctx.alert(MonitorMsg::Warning(format!(
-                    "DCA {pair} dilewati: alamat router tidak valid"
-                )))
-                .await;
-                continue;
-            }
 
             ctx.log(
                 "dca_signal",
@@ -215,14 +202,14 @@ mod tests {
 
     fn grid() -> GridCfg {
         GridCfg {
-            token_in: "WETH".into(),
-            token_out: "USDC".into(),
+            token_in: "0x0000000000000000000000000000000000000001".parse().unwrap(),
+            token_out: "0x0000000000000000000000000000000000000002".parse().unwrap(),
             pair: "WETH/USDC".into(),
             upper_price: Decimal::from(200),
             lower_price: Decimal::from(100),
             grid_count: 4,
             amount_per_grid: Decimal::ONE,
-            dex_router: "0x0000000000000000000000000000000000000001".into(),
+            dex_router: "0x0000000000000000000000000000000000000001".parse().unwrap(),
         }
     }
 
@@ -255,12 +242,12 @@ mod tests {
     #[test]
     fn dca_trigger_requires_equal_positive_amount() {
         let plan = DcaCfg {
-            token_in: "WETH".into(),
-            token_out: "USDC".into(),
+            token_in: "0x0000000000000000000000000000000000000001".parse().unwrap(),
+            token_out: "0x0000000000000000000000000000000000000002".parse().unwrap(),
             pair: "WETH/USDC".into(),
             interval_secs: 60,
             amount: Decimal::ONE,
-            dex_router: "0x0000000000000000000000000000000000000001".into(),
+            dex_router: "0x0000000000000000000000000000000000000001".parse().unwrap(),
         };
         assert!(matches_dca_trigger(&plan, Decimal::ONE));
         assert!(!matches_dca_trigger(&plan, Decimal::ZERO));

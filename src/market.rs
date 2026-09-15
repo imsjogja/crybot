@@ -13,6 +13,7 @@ use std::sync::{Arc, RwLock};
 use alloy::primitives::U256;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use alloy::primitives::Address;
 
 /// Default maksimum umur state sebelum dianggap stale (ms).
 /// Blueprint §15: "MarketState freshness + stale rejection".
@@ -46,9 +47,9 @@ pub struct GasState {
 /// State satu pool DEX (blueprint §4: reserves, price, liquidity, volume windows).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PoolState {
-    pub pool: String,
-    pub token0: String,
-    pub token1: String,
+    pub pool: Address,
+    pub token0: Address,
+    pub token1: Address,
     pub dex: String,
     pub reserve0: U256,
     pub reserve1: U256,
@@ -140,8 +141,8 @@ pub struct MarketState {
     pub block_number: u64,
     pub block_ts_ms: i64,
     pub gas: GasState,
-    /// Pool yang sedang dipantau, keyed by alamat lowercase.
-    pools: HashMap<String, PoolState>,
+    /// Pool yang sedang dipantau, keyed by address.
+    pools: HashMap<Address, PoolState>,
     /// Jumlah block gap (lompatan nomor block > 1) — indikator reorg/feed lag.
     pub block_gaps: u64,
 }
@@ -184,14 +185,14 @@ impl MarketState {
     }
 
     /// Upsert pool dari NewPool (factory event).
-    pub fn on_new_pool(&mut self, pool: &str, token0: &str, token1: &str, dex: &str, ts_ms: i64) {
+    pub fn on_new_pool(&mut self, pool: Address, token0: Address, token1: Address, dex: &str, ts_ms: i64) {
         self.pools
-            .entry(pool.to_lowercase())
+            .entry(pool)
             .and_modify(|p| p.last_update_ms = ts_ms)
             .or_insert_with(|| PoolState {
-                pool: pool.to_string(),
-                token0: token0.to_string(),
-                token1: token1.to_string(),
+                pool: pool,
+                token0: token0,
+                token1: token1,
                 dex: dex.to_string(),
                 reserve0: U256::ZERO,
                 reserve1: U256::ZERO,
@@ -207,9 +208,8 @@ impl MarketState {
     /// (event normalization sebelum market engine — blueprint §4).
     /// Delta reserve antar-Sync juga dinormalisasi menjadi FlowSample untuk
     /// window volume/buys/sells/whale_netflow (blueprint §4).
-    pub fn on_pool_sync(&mut self, pool: &str, reserve0: U256, reserve1: U256, ts_ms: i64) {
-        let key = pool.to_lowercase();
-        if let Some(p) = self.pools.get_mut(&key) {
+    pub fn on_pool_sync(&mut self, pool: Address, reserve0: U256, reserve1: U256, ts_ms: i64) {
+        if let Some(p) = self.pools.get_mut(&pool) {
             // Aproksimasi arah & volume trade dari delta reserve (§4):
             // reserve0 naik & reserve1 turun => token1 dibeli; sebaliknya => dijual.
             if !p.reserve0.is_zero() && !p.reserve1.is_zero() {
@@ -241,8 +241,8 @@ impl MarketState {
         }
     }
 
-    pub fn pool(&self, pool: &str) -> Option<&PoolState> {
-        self.pools.get(&pool.to_lowercase())
+    pub fn pool(&self, pool: Address) -> Option<&PoolState> {
+        self.pools.get(&pool)
     }
 
     pub fn pool_count(&self) -> usize {
@@ -315,9 +315,9 @@ mod tests {
     #[test]
     fn sync_menghitung_harga() {
         let mut m = MarketState::default();
-        m.on_new_pool("0xPOOL", "0xA", "0xB", "aerodrome", 1000);
-        m.on_pool_sync("0xpool", U256::from(2000u64), U256::from(1000u64), 2000);
-        let p = m.pool("0xPOOL").expect("pool ada (case-insensitive)");
+        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 1000);
+        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(2000u64), U256::from(1000u64), 2000);
+        let p = m.pool(Address::repeat_byte(0x11)).expect("pool ada (case-insensitive)");
         assert_eq!(p.price, Decimal::from(2));
         assert_eq!(p.last_update_ms, 2000);
     }
@@ -325,15 +325,15 @@ mod tests {
     #[test]
     fn price_change_dan_flow_window_bekerja() {
         let mut m = MarketState::default();
-        m.on_new_pool("0xpool", "0xA", "0xB", "aerodrome", 0);
+        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 0);
         // Sync awal membentuk baseline (tidak ada flow karena reserve sebelumnya nol).
-        m.on_pool_sync("0xpool", U256::from(1000u64), U256::from(1000u64), 1_000);
+        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1000u64), U256::from(1000u64), 1_000);
         // Buy token1: reserve0 naik, reserve1 turun pada t=301s.
-        m.on_pool_sync("0xpool", U256::from(1200u64), U256::from(600u64), 301_000);
+        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1200u64), U256::from(600u64), 301_000);
         // Sell token1: reserve0 turun, reserve1 naik pada t=302s.
-        m.on_pool_sync("0xpool", U256::from(1100u64), U256::from(700u64), 302_000);
+        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1100u64), U256::from(700u64), 302_000);
 
-        let p = m.pool("0xpool").unwrap();
+        let p = m.pool(Address::repeat_byte(0x11)).unwrap();
         // Harga baseline 1.0 (t=1s) -> 1.5714 (t=302s) dalam window 5 menit.
         let change = p.price_change_pct(300_000, 302_000).expect("ada baseline");
         assert!(change > Decimal::from(57) && change < Decimal::from(58));
@@ -348,17 +348,17 @@ mod tests {
     #[test]
     fn whale_netflow_menjumlah_trade_besar() {
         let mut m = MarketState::default();
-        m.on_new_pool("0xpool", "0xA", "0xB", "aerodrome", 0);
+        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 0);
         let whale = U256::from_str_radix("1000000000000000000", 10).unwrap(); // 1e18
-        m.on_pool_sync("0xpool", whale, whale, 1_000);
+        m.on_pool_sync(Address::repeat_byte(0x11), whale, whale, 1_000);
         // Whale buy: reserve0 naik 2e18.
         m.on_pool_sync(
-            "0xpool",
+            Address::repeat_byte(0x11),
             whale * U256::from(3u64),
             whale / U256::from(2u64),
             2_000,
         );
-        let p = m.pool("0xpool").unwrap();
+        let p = m.pool(Address::repeat_byte(0x11)).unwrap();
         assert_eq!(
             p.whale_netflow_token0(60_000, 2_000),
             Decimal::from_str_exact("2000000000000000000").unwrap()

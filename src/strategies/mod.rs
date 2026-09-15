@@ -19,7 +19,7 @@ pub mod r#yield;
 
 use std::collections::HashMap;
 
-use alloy::primitives::U256;
+use alloy::primitives::{Address, U256};
 use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, StrategiesCfg};
@@ -140,7 +140,7 @@ impl StrategyEngine {
         }
 
         // Cooldown sinyal scoring per pool (§5) — hindari spam tiap Sync.
-        let mut last_signal: HashMap<String, i64> = HashMap::new();
+        let mut last_signal: HashMap<Address, i64> = HashMap::new();
 
         while let Some(event) = self.rx_event.recv().await {
             // Normalisasi event -> MarketState SEBELUM strategi membaca
@@ -160,8 +160,8 @@ impl StrategyEngine {
                 // (RwLockWriteGuard tidak Send).
                 let snapshot = {
                     let mut m = self.shared.market.write().expect("market lock poisoned");
-                    m.on_pool_sync(pool, r0, r1, *ts_ms);
-                    m.pool(pool).cloned()
+                    m.on_pool_sync(*pool, r0, r1, *ts_ms);
+                    m.pool(*pool).cloned()
                 };
 
                 // Scoring multi-faktor (blueprint §5): setelah state ter-update,
@@ -171,7 +171,7 @@ impl StrategyEngine {
                     let last = last_signal.get(&pool_state.pool).copied().unwrap_or(0);
                     if now_ms().saturating_sub(last) >= SIGNAL_COOLDOWN_MS {
                         if let Some(candidate) = score::evaluate_candidate(&pool_state) {
-                            last_signal.insert(pool_state.pool.clone(), now_ms());
+                            last_signal.insert(pool_state.pool, now_ms());
                             self.shared.metrics.inc(&self.shared.metrics.signals);
                             let side = if candidate.factors.momentum >= 50 {
                                 "buy"

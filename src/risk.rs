@@ -68,22 +68,21 @@ impl RiskEngine {
 
         let allowed_routers: HashSet<Address> = if cfg.risk.allowed_routers.is_empty() {
             let a = &cfg.base.addresses;
-            [
-                &a.aerodrome_router,
-                &a.aerodrome_slipstream_router,
-                &a.uniswap_v3_router,
-                &a.baseswap_router,
-                &a.sushiswap_router,
-                &a.pancakeswap_v3_router,
+            vec![
+                a.aerodrome_router,
+                a.aerodrome_slipstream_router,
+                a.uniswap_v3_router,
+                a.baseswap_router,
+                a.sushiswap_router,
+                a.pancakeswap_v3_router,
             ]
-            .iter()
-            .filter_map(|s| s.parse::<Address>().ok())
+            .into_iter()
             .collect()
         } else {
             cfg.risk
                 .allowed_routers
                 .iter()
-                .filter_map(|s| s.parse::<Address>().ok())
+                .copied()
                 .collect()
         };
 
