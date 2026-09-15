@@ -11,12 +11,32 @@ risk:
   kill_switch_drawdown_pct: "10"
   # false = bot tidak mengirim order apa pun. Set true HANYA setelah paper/testnet lolos.
   armed: false
+  # Nilai maksimum per transaksi dalam ETH (blueprint §9: max transaction value).
+  max_tx_value_eth: "0.05"
+  # Allowlist router DEX yang boleh dieksekusi (kosong = default 6 router dari base.addresses).
+  allowed_routers: []
+  # Saat emergency halt: SELL tetap diizinkan (controlled exit), BUY diblokir (§13).
+  allow_sell_during_halt: true
+  # Circuit breaker: N error eksekusi beruntun -> emergency stop otomatis (§13).
+  circuit_breaker_consecutive_errors: 5
+  # Price impact maksimum (persen) yang masih boleh dieksekusi (blueprint §7).
+  max_price_impact_pct: "10"
+
+# Simulation gate (blueprint §8): eth_call + estimate_gas SEBELUM submit,
+# berlaku di mode paper maupun live.
+simulation:
+  pre_submit: true
+  # Quote lebih tua dari ini (ms) dianggap stale dan ditolak risk engine (§3.5).
+  quote_ttl_ms: 3000
+  # Wajibkan simulasi SELL balik untuk order BUY (§8 sellability check).
+  # Aktifkan hanya setelah strategi menghasilkan reverse_calldata yang valid.
+  require_sell_sim: false
 
 monitor:
   telegram_bot_token_env: TELEGRAM_BOT_TOKEN
   telegram_chat_id_env: TELEGRAM_CHAT_ID
   alert_on_fill: true
-  # Perintah interaktif /status /stop /resume (hanya dari TELEGRAM_CHAT_ID)
+  # Perintah interaktif /status /halt /resume /stop (hanya dari TELEGRAM_CHAT_ID)
   commands_enabled: true
 
 store:
@@ -34,6 +54,10 @@ base:
   http_url: "https://mainnet.base.org"
   flashblocks: true
   mev_rpc_url: null
+  # Interval polling fallback HTTP bila WSS down (ms).
+  poll_interval_ms: 1000
+  # Market state lebih tua dari ini (ms) dianggap stale (blueprint §4).
+  stale_ms: 10000
   private_key_env: BASE_PRIVATE_KEY
 
 # Strategi Base Network — semua default disabled (aman)
