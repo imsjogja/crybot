@@ -5,7 +5,8 @@
 //!   (PoolCreated/PairCreated) -> `NewBlock` + `NewPool`. Latensi rendah,
 //!   gas state diupdate per header, gap/reorg dihitung (§15 checklist).
 //! - **HTTP polling** (fallback otomatis): polling nomor block per
-//!   `poll_interval_ms`. Tetap aman untuk paper mode.
+//!   `poll_interval_ms` plus pemindaian logs factory via `eth_getLogs`
+//!   (PairCreated/PoolCreated -> `NewPool`). Tetap aman untuk paper mode.
 //!
 //! Semua event dinormalisasi ke `MarketState` SEBELUM diteruskan ke
 //! strategy engine (blueprint §4: "event normalization before market engine").
@@ -42,6 +43,24 @@ fn aero_pool_created_topic() -> B256 {
 /// belum dipetakan ke NewPool (butuh decode data), jadi hanya diawasi di log.
 fn univ3_pool_created_topic() -> B256 {
     keccak256("PoolCreated(address,address,uint24,int24,address)")
+}
+
+/// Batas maksimum rentang block yang dipindai ulang untuk logs factory saat
+/// polling — mencegah request `eth_getLogs` raksasa setelah feed tertinggal.
+const MAX_LOG_SCAN_BLOCKS: u64 = 100;
+
+/// Menentukan rentang block `[from, to]` untuk pemindaian logs factory.
+/// Kunjungan pertama hanya memindai block terkini (tanpa backfill); rentang
+/// dibatasi `MAX_LOG_SCAN_BLOCKS`. `None` bila tidak ada yang perlu dipindai.
+fn scan_window(last_scanned: Option<u64>, number: u64, no_factories: bool) -> Option<(u64, u64)> {
+    if no_factories {
+        return None;
+    }
+    let from = match last_scanned {
+        Some(last) => (last + 1).max(number.saturating_sub(MAX_LOG_SCAN_BLOCKS)),
+        None => number,
+    };
+    (from <= number).then_some((from, number))
 }
 
 /// Konektor read-only untuk RPC Base.
@@ -301,7 +320,8 @@ impl BaseConnector {
         .collect()
     }
 
-    /// Feed polling HTTP (fallback) — hanya NewBlock + gas opsional.
+    /// Feed polling HTTP (fallback) — NewBlock + pemindaian logs factory
+    /// (`eth_getLogs`) agar `NewPool` tetap mengalir tanpa WSS.
     async fn run_http_polling(
         &self,
         tx_events: mpsc::Sender<StrategyEvent>,
@@ -310,12 +330,15 @@ impl BaseConnector {
         mut shutdown: watch::Receiver<bool>,
     ) {
         let mut last_block = None;
+        let mut last_scanned: Option<u64> = None;
+        let no_factories = self.factory_addresses().is_empty();
         let mut poll_interval =
             tokio::time::interval(Duration::from_millis(self.config.poll_interval_ms));
         poll_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         tracing::info!(
             interval_ms = self.config.poll_interval_ms,
+            factories = self.factory_addresses().len(),
             "event loop Base berbasis polling HTTP dimulai (fallback)"
         );
 
@@ -346,6 +369,31 @@ impl BaseConnector {
                                 }
                                 last_block = Some(number);
                                 tracing::debug!(block = number, "block Base baru terdeteksi");
+
+                                if let Some((from, to)) =
+                                    scan_window(last_scanned, number, no_factories)
+                                {
+                                    match self
+                                        .scan_factory_logs(
+                                            from,
+                                            to,
+                                            &tx_events,
+                                            &market,
+                                            &metrics,
+                                            &mut shutdown,
+                                        )
+                                        .await
+                                    {
+                                        Ok(true) => last_scanned = Some(to),
+                                        Ok(false) => break,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                %error, from, to,
+                                                "gagal polling logs factory — dicoba lagi tick berikutnya"
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
                         Err(error) => {
@@ -362,6 +410,57 @@ impl BaseConnector {
         }
 
         tracing::info!("event loop Base berhenti");
+    }
+
+    /// Memindai logs factory (PairCreated/PoolCreated) pada rentang block via
+    /// HTTP `eth_getLogs` — pengganti feed WSS saat fallback polling.
+    /// `Ok(false)` berarti loop harus berhenti (channel ditutup/shutdown).
+    async fn scan_factory_logs(
+        &self,
+        from: u64,
+        to: u64,
+        tx_events: &mpsc::Sender<StrategyEvent>,
+        market: &SharedMarketState,
+        metrics: &SharedMetrics,
+        shutdown: &mut watch::Receiver<bool>,
+    ) -> Result<bool> {
+        let filter = Filter::new()
+            .address(self.factory_addresses())
+            .event_signature(vec![
+                pair_created_topic(),
+                aero_pool_created_topic(),
+                univ3_pool_created_topic(),
+            ])
+            .from_block(from)
+            .to_block(to);
+        let logs = self
+            .provider
+            .get_logs(&filter)
+            .await
+            .context("eth_getLogs factory gagal")?;
+
+        for log in &logs {
+            let Some(event) = Self::decode_factory_log(log) else {
+                continue;
+            };
+            if let StrategyEvent::NewPool {
+                pool,
+                token0,
+                token1,
+                dex,
+                ts_ms,
+            } = &event
+            {
+                let mut m = market.write().expect("market lock poisoned");
+                m.on_new_pool(pool, token0, token1, dex, *ts_ms);
+            }
+            metrics.inc(&metrics.signals);
+            tracing::info!(from, to, "pool baru terdeteksi via polling HTTP");
+            if !Self::send_event(tx_events, event, shutdown).await {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     async fn send_event(
@@ -382,5 +481,35 @@ impl BaseConnector {
                 !changed.is_err() && !*shutdown.borrow()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scan_window_pertama_hanya_block_terkini() {
+        assert_eq!(scan_window(None, 100, false), Some((100, 100)));
+    }
+
+    #[test]
+    fn scan_window_melanjutkan_dari_block_terakhir() {
+        assert_eq!(scan_window(Some(100), 105, false), Some((101, 105)));
+    }
+
+    #[test]
+    fn scan_window_dibatasi_rentang_maksimum() {
+        let number = MAX_LOG_SCAN_BLOCKS + 51;
+        assert_eq!(
+            scan_window(Some(1), number, false),
+            Some((number - MAX_LOG_SCAN_BLOCKS, number))
+        );
+    }
+
+    #[test]
+    fn scan_window_kosong_tanpa_factory_atau_block_baru() {
+        assert_eq!(scan_window(Some(5), 5, false), None);
+        assert_eq!(scan_window(None, 10, true), None);
     }
 }

@@ -153,6 +153,11 @@ impl Strategy for SniperStrategy {
             "SNIPER PAPER: kandidat {pool} ({pair}) terdeteksi; reserve dan safety check RPC belum tervalidasi, order ditahan"
         )))
         .await;
+
+        // Dual-write ke tabel signals (§12) agar kandidat tampil di dashboard;
+        // score 0 = belum dinilai scoring multi-faktor (validasi RPC pending).
+        ctx.log("signal_created", candidate_signal_payload(pool, &pair, dex))
+            .await;
     }
 
     async fn start(&mut self, state: &SharedState) {
@@ -167,6 +172,23 @@ impl Strategy for SniperStrategy {
 
 fn normalize(value: &str) -> String {
     value.trim().to_ascii_lowercase()
+}
+
+/// Payload `signal_created` untuk kandidat sniper — disimpan store ke tabel
+/// `signals` (§12) dan ditampilkan dashboard via `/api/signals`.
+fn candidate_signal_payload(pool: &str, pair: &str, dex: &str) -> String {
+    serde_json::json!({
+        "strategy": "sniper",
+        "pair": pair,
+        "pool": pool,
+        "side": "buy",
+        "score": 0,
+        "reasons": [
+            format!("pool baru terdeteksi via {dex}"),
+            "validasi RPC pending: reserve, honeypot, ownership, lp_lock, holder",
+        ],
+    })
+    .to_string()
 }
 
 fn factory_config_is_valid(allowlist: &[String]) -> bool {
@@ -228,5 +250,16 @@ mod tests {
         let mut strategy = SniperStrategy::new(SniperCfg::default());
         assert!(strategy.pool_is_new("0xAbC"));
         assert!(!strategy.pool_is_new(" 0xabc "));
+    }
+
+    #[test]
+    fn payload_sinyal_kandidat_memuat_field_wajib() {
+        let payload = candidate_signal_payload("0xpool", "0xWETH/0xTKN", "aerodrome");
+        let parsed: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(parsed["strategy"], "sniper");
+        assert_eq!(parsed["pair"], "0xWETH/0xTKN");
+        assert_eq!(parsed["side"], "buy");
+        assert_eq!(parsed["score"], 0);
+        assert!(parsed["reasons"].as_array().unwrap().len() >= 2);
     }
 }

@@ -129,6 +129,7 @@
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2>Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
+        <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
       </div>
     </section>
 
@@ -199,14 +200,35 @@ function buildTradeTable(trades) {
     return `<tr><td>${esc(time)}</td><td>${kind}</td><td><strong>${esc(pair)}</strong> ${data.paper ? '· PAPER' : ''}</td><td>${esc(strategy)}</td><td class="muted">${esc(tx)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
+function shortAddr(value) {
+  const text = String(value || '');
+  return /^0x[0-9a-fA-F]{20,}$/.test(text) ? `${text.slice(0, 8)}…${text.slice(-6)}` : text;
+}
+function renderSignals(result) {
+  const signals = result && Array.isArray(result.signals) ? result.signals : [];
+  if (!signals.length) {
+    $('signalTable').innerHTML = '<div class="empty">Belum ada sinyal. Pool baru akan tampil di sini saat strategi sniper aktif dan ada PairCreated/PoolCreated di Base.</div>';
+    return;
+  }
+  $('signalTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Pair / token</th><th>Side</th><th>Skor</th><th>Strategi</th><th>Alasan</th></tr></thead><tbody>${signals.map(signal => {
+    const time = new Date(signal.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const pair = String(signal.pair || '—');
+    const pairShort = pair.split('/').map(shortAddr).join(' / ');
+    const side = String(signal.side || '').toLowerCase();
+    const sidePill = side === 'buy' || side === 'sell' ? `<span class="pill ${side}">${esc(side.toUpperCase())}</span>` : esc(signal.side || '—');
+    const score = num(signal.score);
+    const reasons = Array.isArray(signal.reasons) ? signal.reasons.join(' · ') : String(signal.reasons || '—');
+    return `<tr><td>${esc(time)}</td><td><strong title="${esc(pair)}">${esc(pairShort)}</strong></td><td>${sidePill}</td><td>${score > 0 ? esc(score) : '—'}</td><td>${esc(signal.strategy || '—')}</td><td class="muted">${esc(reasons)}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
 function renderOptionalStrategies(result) {
   const text = result.available ? 'Endpoint strategi tersedia. Detail konfigurasi bisa dilihat di tab Overview.' : 'Belum tersedia dari server ini.';
   ['strategySniper', 'strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = text; });
 }
 async function loadAll() {
   try {
-    const [status, trades] = await Promise.all([api('/api/status'), api('/api/trades')]);
-    renderStatus(status); renderTrades(trades); setConnection('Polling aktif', 'ok');
+    const [status, trades, signals] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals')]);
+    renderStatus(status); renderTrades(trades); renderSignals(signals); setConnection('Polling aktif', 'ok');
     const strategies = await optionalApi('/api/strategies'); renderOptionalStrategies(strategies);
   } catch (error) {
     if (error.message === 'unauthorized') return;
