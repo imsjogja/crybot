@@ -103,6 +103,7 @@
 
   <nav class="tabs" aria-label="Bagian dashboard" role="tablist">
     <button class="tab" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview" data-tab="overview">Overview</button>
+    <button class="tab" id="tab-scanner" role="tab" aria-selected="false" aria-controls="scanner" data-tab="scanner">Market Scanner</button>
     <button class="tab" id="tab-sniper" role="tab" aria-selected="false" aria-controls="sniper" data-tab="sniper">Token Sniper</button>
     <button class="tab" id="tab-copy" role="tab" aria-selected="false" aria-controls="copy" data-tab="copy">Copy Wallet</button>
     <button class="tab" id="tab-grid" role="tab" aria-selected="false" aria-controls="grid" data-tab="grid">Grid &amp; DCA</button>
@@ -127,15 +128,25 @@
         <article class="card" id="safetyCard"><h2>Keamanan eksekusi</h2><p>Periksa ini sebelum menilai hasil.</p><div class="metric" id="safetyState">—</div><div class="rows"><div class="row"><span>Mode</span><span id="safeMode">—</span></div><div class="row"><span>risk.armed</span><span id="safeArmed">—</span></div><div class="row"><span>Halt pengaman</span><span id="safeHalt">—</span></div></div></article>
         <article class="card"><h2>Metrik eksekusi</h2><p>Order, fill, dan error dari Base executor.</p><div class="rows"><div class="row"><span>Orders</span><span id="mOrders">—</span></div><div class="row"><span>Fills</span><span id="mFills">—</span></div><div class="row"><span>Errors</span><span id="mErrors">—</span></div></div></article>
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
-        <article class="card"><h2>Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
+        <article class="card"><h2 id="activeStrategyTitle">Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
-        <article class="card full"><h2>Market Scanner (Live Tokens)</h2><p>Trending tokens di Base (GeckoTerminal)</p><div id="scannerTable" class="empty">Menunggu data scanner...</div></article>
-        <article class="card full" id="chartCard" style="display: none;">
-          <h2 id="chartTitle">Chart</h2>
-          <div id="chartContainer" style="height: 400px; margin-top: 10px;"></div>
-        </article>
-
         <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
+      </div>
+    </section>
+
+    <section id="scanner" role="tabpanel" aria-labelledby="tab-scanner" hidden>
+      <div class="feature">
+        <h2>Market Scanner (Live Tokens)</h2>
+        <p>Trending tokens di Base (GeckoTerminal)</p>
+        <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 15px;">
+          <div style="flex: 1; min-width: 300px;">
+            <div id="scannerTable" class="empty">Menunggu data scanner...</div>
+          </div>
+          <div style="flex: 1; min-width: 300px; display: none;" id="chartInlineBox">
+            <h3 id="chartTitle" style="margin-top:0">Chart</h3>
+            <div id="chartContainer" style="height: 500px; background: var(--surface-2); border-radius: 8px; overflow: hidden;"></div>
+          </div>
+        </div>
       </div>
     </section>
 
@@ -210,6 +221,18 @@ function renderStatus(s) {
   $('latE2e').textContent = `${esc(metrics.e2e_p50)} / ${esc(metrics.e2e_p95)} / ${esc(metrics.e2e_p99)}`;
   const strategies = Array.isArray(s.strategies) ? s.strategies : []; const active = strategies.filter(x => x.enabled).map(x => x.name);
   $('strategyCount').textContent = active.length; $('strategyList').innerHTML = active.length ? active.map(n => `<span style="color:var(--green)">&#9679;</span> ${esc(n)}`).join(', ') : 'Tidak ada strategi aktif';
+  if ($('activeStrategyTitle')) { $('activeStrategyTitle').innerHTML = active.length ? '<span style="color:var(--green)">&#9679;</span> Strategi aktif' : 'Strategi aktif'; }
+  document.querySelectorAll('.tab').forEach(t => {
+      let isStrategy = false; let strategyName = '';
+      if (t.id === 'tab-sniper') { isStrategy = true; strategyName = 'sniper'; }
+      if (t.id === 'tab-arbitrage') { isStrategy = true; strategyName = 'arbitrage'; }
+      if (t.id === 'tab-yield') { isStrategy = true; strategyName = 'yield'; }
+      if (t.id === 'tab-perps') { isStrategy = true; strategyName = 'perps'; }
+      if (isStrategy) {
+          let text = t.textContent.replace('●', '').trim();
+          t.innerHTML = active.includes(strategyName) ? `<span style="color:var(--green)">&#9679;</span> ${text}` : text;
+      }
+  });
   $('copySummary').textContent = `${metrics.orders ?? 0} order, ${metrics.fills ?? 0} fill, ${metrics.errors ?? 0} error.`;
   setSafetyBanner(s);
 }
@@ -337,14 +360,13 @@ function showChart(pairStr) {
   const target = tokens[0];
   if (!target.startsWith('0x')) return;
   
-  const chartCard = $('chartCard');
+  const chartInlineBox = $('chartInlineBox');
   const chartTitle = $('chartTitle');
   const chartContainer = $('chartContainer');
   
-  chartCard.style.display = 'block';
+  chartInlineBox.style.display = 'block';
   chartTitle.textContent = pairStr;
   chartContainer.innerHTML = `<iframe src="https://dexscreener.com/base/${target}?embed=1&theme=dark&info=0" width="100%" height="100%" frameborder="0"></iframe>`;
-  chartCard.scrollIntoView({ behavior: 'smooth' });
 }
 
 connectWebSocket();
