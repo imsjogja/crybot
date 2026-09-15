@@ -256,7 +256,7 @@ impl Default for BaseAddresses {
             aerodrome_nft_manager: "0x827922686190790b37229fd06084350e74485b72".into(),
             uniswap_v3_router: "0x2626664c2603336E57B271c5C0b26F421741e481".into(),
             uniswap_v2_factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6".into(),
-            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346831e3b".into(),
+            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31f984".into(),
             uniswap_v3_nft_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".into(),
             baseswap_router: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86".into(),
             baseswap_factory: "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB".into(),
