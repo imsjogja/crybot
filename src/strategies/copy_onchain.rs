@@ -48,10 +48,10 @@ impl Strategy for CopyOnChainStrategy {
             wallet,
             tx_hash,
             to,
-            calldata_hex,
-            value_eth,
-            ts_ms,
-        } = event
+           calldata_hex,
+           value_eth,
+            ts_ms: _,
+       } = event
         else {
             return;
         };

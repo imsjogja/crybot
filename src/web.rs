@@ -259,11 +259,10 @@ async fn send_strategy_statuses(socket: &mut WebSocket, strategies: &StrategiesC
     for status in strategy_statuses(strategies) {
         let enabled = status["enabled"].as_bool().unwrap_or(false);
         let name = status["name"].as_str().unwrap_or("unknown").to_owned();
-        let payload = match serde_json::to_string(&WebWsMsg::Status {
-            strategy: name,
-            enabled,
-            pnl: Decimal::ZERO,
-        }) {
+       let payload = match serde_json::to_string(&WebWsMsg::Status {
+           strategy: name,
+           enabled,
+       }) {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::warn!(error = %error, "gagal serialisasi status WebSocket");
