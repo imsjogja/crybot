@@ -4,7 +4,6 @@
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
 
@@ -12,16 +11,15 @@ use crypto_copy_bot::config::AppConfig;
 use crypto_copy_bot::connectors::base::BaseConnector;
 use crypto_copy_bot::events::{LogEntry, MonitorMsg, StrategyEvent};
 use crypto_copy_bot::execution::base_executor::{run_base_execution, BaseExecutor, BaseOrder};
+use crypto_copy_bot::market::new_shared_market_state;
 use crypto_copy_bot::metrics::{self, new_shared_metrics};
 use crypto_copy_bot::monitor::commands::{run_command_listener, StaticInfo};
 use crypto_copy_bot::monitor::telegram::{run_monitor, TelegramAlerter};
+use crypto_copy_bot::risk::{new_halt_flag, RiskEngine};
+use crypto_copy_bot::simulation::Simulator;
 use crypto_copy_bot::store::{self, run_store};
 use crypto_copy_bot::strategies::{SharedState, StrategyEngine};
-use crypto_copy_bot::web::{self, HaltFlag, WebState};
-
-fn new_halt_flag() -> HaltFlag {
-    Arc::new(AtomicBool::new(false))
-}
+use crypto_copy_bot::web::{self, WebState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -52,21 +50,36 @@ async fn main() -> Result<()> {
 
     let metrics = new_shared_metrics();
     let started = std::time::Instant::now();
+
+    // Blueprint §4/§7/§13: market state, halt flag, risk engine.
+    let market = new_shared_market_state();
     let halt = new_halt_flag();
+    let risk = std::sync::Arc::new(RiskEngine::new(&cfg, halt.clone()));
 
     // Base components
     let connector = BaseConnector::new(&cfg.base)?;
     let executor = BaseExecutor::new(&cfg.base, cfg.mode.is_paper())?;
     let wallet_address = executor.signer_address().to_string();
+    // Blueprint §8: simulasi eth_call pre-submit (paper dan live).
+    let simulator = if cfg.simulation.pre_submit {
+        Some(Simulator::new(
+            executor.read_provider().clone(),
+            executor.signer_address(),
+        ))
+    } else {
+        None
+    };
     let pool = store::init_pool(&cfg.store.sqlite_path).await?;
 
     let shared = SharedState {
         config: cfg.strategies.clone(),
         base_addresses: cfg.base.addresses.clone(),
+        market: market.clone(),
         pool: pool.clone(),
         tx_log: tx_log.clone(),
         tx_monitor: tx_monitor.clone(),
         tx_base_order,
+        metrics: metrics.clone(),
     };
     let strategy_engine = StrategyEngine::new(&cfg, rx_strategy_event, shared);
 
@@ -78,15 +91,26 @@ async fn main() -> Result<()> {
     let mut handles = Vec::new();
 
     let base_shutdown = rx_shutdown.clone();
+    let connector_market = market.clone();
+    let connector_metrics = metrics.clone();
     handles.push(tokio::spawn(async move {
         connector
-            .run_event_loop(tx_strategy_event, base_shutdown)
+            .run_event_loop(
+                tx_strategy_event,
+                connector_market,
+                connector_metrics,
+                base_shutdown,
+            )
             .await;
     }));
 
     handles.push(tokio::spawn(run_base_execution(
         rx_base_order,
         executor,
+        risk.clone(),
+        simulator,
+        cfg.simulation.quote_ttl_ms,
+        cfg.simulation.require_sell_sim,
         tx_log.clone(),
         tx_monitor.clone(),
         metrics.clone(),
@@ -109,6 +133,7 @@ async fn main() -> Result<()> {
             metrics.clone(),
             tx_monitor.clone(),
             tx_shutdown.clone(),
+            risk.clone(),
         )));
     }
 
@@ -140,6 +165,7 @@ async fn main() -> Result<()> {
             tx_shutdown: tx_shutdown.clone(),
             tx_monitor: tx_monitor.clone(),
             halt: halt.clone(),
+            risk: risk.clone(),
             started,
         });
         handles.push(tokio::spawn(web::run_web_server(

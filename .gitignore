@@ -3,3 +3,4 @@
 data/*.db
 data/*.db-journal
 /config/production.yaml
+.DS_Store

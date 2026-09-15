@@ -12,9 +12,9 @@ pub mod arbitrage;
 pub mod common;
 pub mod copy_onchain;
 pub mod grid_dca;
+pub mod perps;
 pub mod score;
 pub mod sniper;
-pub mod perps;
 pub mod r#yield;
 
 use std::collections::HashMap;

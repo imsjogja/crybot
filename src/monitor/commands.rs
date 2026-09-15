@@ -7,11 +7,13 @@ use crate::config::Mode;
 use crate::events::MonitorMsg;
 use crate::metrics::SharedMetrics;
 use crate::monitor::telegram::TelegramAlerter;
+use crate::risk::SharedRiskEngine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Status,
     Stop,
+    Halt,
     Resume,
     Help,
     Unknown,
@@ -23,6 +25,7 @@ pub fn parse_command(text: &str) -> Command {
     match cmd {
         "/status" => Command::Status,
         "/stop" => Command::Stop,
+        "/halt" => Command::Halt,
         "/resume" => Command::Resume,
         "/help" | "/start" => Command::Help,
         _ => Command::Unknown,
@@ -33,6 +36,7 @@ pub fn parse_callback(data: &str) -> Command {
     match data {
         "status" => Command::Status,
         "stop" => Command::Stop,
+        "halt" => Command::Halt,
         "resume" => Command::Resume,
         _ => Command::Unknown,
     }
@@ -45,7 +49,7 @@ pub struct StaticInfo {
     pub started: Instant,
 }
 
-pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics) -> String {
+pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics, risk: &SharedRiskEngine) -> String {
     let snap = metrics.snapshot();
     let mode_label = match info.mode {
         Mode::Paper => "🧪 PAPER (simulasi)",
@@ -57,6 +61,11 @@ pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics) -> String {
     } else {
         "🔒 NONAKTIF (aman)"
     };
+    let halt_label = if risk.is_halted() {
+        "⛔ HALT AKTIF — BUY diblokir"
+    } else {
+        "✅ normal"
+    };
     let up = info.started.elapsed().as_secs();
     let lat = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("–".into());
 
@@ -64,15 +73,21 @@ pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics) -> String {
         "<b>🤖 STATUS CRYBOT BASE</b>\n\
          Mode: {mode_label}\n\
          Eksekusi order: {exec_label}\n\
+         Emergency stop: {halt_label}\n\
          Uptime: {h}j {m}m\n\n\
          <b>⚡ Metrik</b>\n\
          orders={od} · fills={ff} · errors={er}\n\
+         risk_rej={rr} · stale_rej={sr} · sim_fail={sf} · revert={rv}\n\
          e2e p50/p95/p99: {ep50}/{ep95}/{ep99}",
         h = up / 3600,
         m = (up % 3600) / 60,
         od = snap.orders,
         ff = snap.follower_fills,
         er = snap.exec_errors,
+        rr = snap.risk_rejected,
+        sr = snap.stale_rejected,
+        sf = snap.sim_failed,
+        rv = snap.reverted_tx,
         ep50 = lat(snap.e2e_p50),
         ep95 = lat(snap.e2e_p95),
         ep99 = lat(snap.e2e_p99),
@@ -82,8 +97,9 @@ pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics) -> String {
 const HELP: &str = "<b>🤖 crybot Base Network</b>\n\
 Gunakan tombol di bawah, atau ketik perintah:\n\
 /status — kartu status lengkap\n\
-/stop — hentikan bot (graceful)\n\
-/resume — info resume\n\
+/halt — emergency stop (BUY baru OFF, monitoring tetap ON)\n\
+/resume — pulihkan dari halt (setelah tinjau penyebab)\n\
+/stop — hentikan bot sepenuhnya (graceful shutdown)\n\
 /help — pesan ini";
 
 async fn dispatch(
@@ -93,10 +109,11 @@ async fn dispatch(
     metrics: &SharedMetrics,
     tx_monitor: &mpsc::Sender<MonitorMsg>,
     tx_shutdown: &watch::Sender<bool>,
+    risk: &SharedRiskEngine,
 ) {
     match cmd {
         Command::Status => {
-            let s = build_status(info, metrics);
+            let s = build_status(info, metrics, risk);
             alerter.send_card(&s, true).await;
         }
         Command::Stop => {
@@ -106,14 +123,28 @@ async fn dispatch(
                 .await;
             let _ = tx_shutdown.send(true);
         }
-        Command::Resume => {
-            tracing::warn!("resume via Telegram tidak mengubah state");
+        Command::Halt => {
+            // Blueprint §13: Emergency Stop — BUY OFF, monitoring ON.
+            tracing::warn!("EMERGENCY STOP via Telegram");
+            risk.emergency_stop();
             alerter
-                .send("▶️ Resume: tidak ada halt flag di bot Base-only. Eksekusi dikendalikan oleh risk.armed di config.")
+                .send("⛔ <b>Emergency stop aktif.</b> Order BUY baru diblokir risk engine. Monitoring tetap berjalan. Gunakan /resume setelah meninjau penyebab.")
+                .await;
+            let _ = tx_monitor
+                .send(MonitorMsg::Critical(
+                    "EMERGENCY STOP via Telegram: halt flag aktif (§13)".into(),
+                ))
+                .await;
+        }
+        Command::Resume => {
+            tracing::warn!("halt di-resume via Telegram");
+            risk.resume();
+            alerter
+                .send("▶️ Resume: halt flag di-clear, circuit breaker direset. Risk engine kembali mengevaluasi order baru.")
                 .await;
             let _ = tx_monitor
                 .send(MonitorMsg::Warning(
-                    "RESUME via Telegram: tidak ada halt flag di bot Base-only".into(),
+                    "RESUME via Telegram: halt flag di-clear oleh operator".into(),
                 ))
                 .await;
         }
@@ -131,6 +162,7 @@ pub async fn run_command_listener(
     metrics: SharedMetrics,
     tx_monitor: mpsc::Sender<MonitorMsg>,
     tx_shutdown: watch::Sender<bool>,
+    risk: SharedRiskEngine,
 ) {
     if token.is_empty() || chat_id.is_empty() {
         tracing::warn!("perintah Telegram nonaktif: token/chat_id kosong");
@@ -180,13 +212,21 @@ pub async fn run_command_listener(
             }
 
             if let Some(cb) = upd.get("callback_query") {
-                let sender = cb.pointer("/message/chat/id").and_then(serde_json::Value::as_i64);
+                let sender = cb
+                    .pointer("/message/chat/id")
+                    .and_then(serde_json::Value::as_i64);
                 if sender != Some(auth_chat_id) {
                     tracing::warn!(?sender, "callback dari chat tidak dikenal — diabaikan");
                     continue;
                 }
-                let data = cb.get("data").and_then(serde_json::Value::as_str).unwrap_or("");
-                let cb_id = cb.get("id").and_then(serde_json::Value::as_str).unwrap_or("");
+                let data = cb
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
+                let cb_id = cb
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("");
                 alerter.answer_callback(cb_id, "diproses…").await;
                 dispatch(
                     parse_callback(data),
@@ -195,6 +235,7 @@ pub async fn run_command_listener(
                     &metrics,
                     &tx_monitor,
                     &tx_shutdown,
+                    &risk,
                 )
                 .await;
                 continue;
@@ -218,6 +259,7 @@ pub async fn run_command_listener(
                 &metrics,
                 &tx_monitor,
                 &tx_shutdown,
+                &risk,
             )
             .await;
         }
@@ -255,6 +297,7 @@ mod tests {
     fn parse_callback_tombol() {
         assert_eq!(parse_callback("status"), Command::Status);
         assert_eq!(parse_callback("stop"), Command::Stop);
+        assert_eq!(parse_callback("halt"), Command::Halt);
         assert_eq!(parse_callback("resume"), Command::Resume);
         assert_eq!(parse_callback("selfdestruct"), Command::Unknown);
     }

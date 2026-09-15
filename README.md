@@ -4,6 +4,34 @@ Bot copy trading crypto low-latency — scaffold Rust sesuai blueprint `Blueprin
 
 **Prinsip: aman secara default.** Mode awal `paper`, `risk.armed=false`, sizing di bawah minimum notional di-SKIP, slippage guard aktif, semua keputusan tercatat.
 
+## Keselarasan Blueprint v2.0 — Base Network (branch `basenetwork`)
+
+Branch ini menyelaraskan kode dengan `Base_Trading_Bot_Blueprint_v2_Rust.pdf`
+("Rust-Centric Low-Latency Architecture for Base Network"). Komponen yang
+ditambahkan/diubah:
+
+| Blueprint | Komponen | Status |
+|---|---|---|
+| §11 domain types | `src/domain.rs` — `Signal`, `TradeIntent`, `RiskDecision`, `Quote` (TTL), `SimulationResult`, `ExecutionReport` | ✅ |
+| §4 market state | `src/market.rs` — `MarketState` in-memory (block, gas, pool reserves/price), gap/reorg counter, freshness + stale rejection | ✅ |
+| §4 feed WSS | `src/connectors/base.rs` — `eth_subscribe` newHeads + factory logs (`PairCreated`/`PoolCreated`) → `NewBlock`/`NewPool`; reconnect backoff; fallback permanen ke polling HTTP setelah 5 kegagalan | ✅ |
+| §7 risk engine | `src/risk.rs` — gate deterministik: armed → halt → allowlist router → max tx value → quote TTL → daily loss lock → circuit breaker; auto emergency-stop saat breaker trip | ✅ |
+| §8 simulation | `src/simulation.rs` — `eth_call` + `estimate_gas` pre-submit; tx revert dibatalkan sebelum signing (paper & live) | ✅ |
+| §9 signer security | key hanya via env (tidak pernah di-log/disimpan), allowlist router, max transaction value | ✅ |
+| §13 emergency stop | `/halt` (Telegram) + `POST /api/halt` (dashboard): BUY OFF, monitoring ON, SELL terkontrol opsional; `/resume` fungsional (clear halt + reset breaker) | ✅ |
+| §13 metrics | latensi rpc/sim/submit-ack/e2e (p50/p95/p99) + counter risk_rejected, stale_rejected, sim_failed, reverted_tx, feed_gaps | ✅ |
+| §12 persistence | tabel `signals`, `risk_decisions`, `orders`, `trades` + dual-write dari event log | ✅ |
+
+**Roadmap blueprint §14 yang belum (iterasi berikutnya):** decoder Swap event
+per-pool (volume windows, buy/sell ratio), strategi multi-faktor §5 (momentum/
+breakout/whale scoring /100), Fast-Profit V1 §6 dengan parameter hasil paper
+test, Flashblocks pre-confirmation stream penuh, nonce/allowance caching,
+Vault/KMS signer isolation.
+
+**Catatan kejujuran teknis:** endpoint `wss://base-flashblocks.coinbase.com`
+belum tentu mendukung `eth_subscribe` standar; bila koneksi/langganan gagal,
+connector otomatis jatuh ke polling HTTP dan mencatatnya dengan jelas.
+
 ## Arsitektur
 
 ```

@@ -182,13 +182,11 @@ impl BaseConnector {
         let mut logs = if factories.is_empty() {
             None
         } else {
-            let filter = Filter::new()
-                .address(factories)
-                .event_signature(vec![
-                    pair_created_topic(),
-                    aero_pool_created_topic(),
-                    univ3_pool_created_topic(),
-                ]);
+            let filter = Filter::new().address(factories).event_signature(vec![
+                pair_created_topic(),
+                aero_pool_created_topic(),
+                univ3_pool_created_topic(),
+            ]);
             match provider.subscribe_logs(&filter).await {
                 Ok(sub) => Some(sub.into_stream()),
                 Err(e) => {

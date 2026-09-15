@@ -110,7 +110,9 @@ fn score_whale(pool: &PoolState, now: i64, reasons: &mut Vec<String>) -> u8 {
         return 50;
     }
     // Skala: netflow +-5 unit token0 (mentah 1e18-based) -> +-50 poin dari 50.
-    let units: f64 = (net / Decimal::from(10u128.pow(18))).try_into().unwrap_or(0.0);
+    let units: f64 = (net / Decimal::from(10u128.pow(18)))
+        .try_into()
+        .unwrap_or(0.0);
     reasons.push(format!("whale: netflow_1h={units:.3} token0"));
     clamp_u8((50.0 + units * 10.0) as i64)
 }
@@ -196,7 +198,10 @@ mod tests {
     use std::collections::VecDeque;
 
     fn pool_with(price_history: Vec<(i64, Decimal)>, flow: Vec<FlowSampleTest>) -> PoolState {
-        let latest_price = price_history.last().map(|(_, p)| *p).unwrap_or(Decimal::ZERO);
+        let latest_price = price_history
+            .last()
+            .map(|(_, p)| *p)
+            .unwrap_or(Decimal::ZERO);
         PoolState {
             pool: "0xpool".into(),
             token0: "0xWETH".into(),
@@ -228,7 +233,10 @@ mod tests {
 
     #[test]
     fn bobot_berjumlah_100() {
-        assert_eq!(W_MOMENTUM + W_VOLUME + W_LIQUIDITY + W_WHALE + W_SAFETY, 100);
+        assert_eq!(
+            W_MOMENTUM + W_VOLUME + W_LIQUIDITY + W_WHALE + W_SAFETY,
+            100
+        );
     }
 
     #[test]
@@ -257,7 +265,10 @@ mod tests {
             });
         }
         let p = pool_with(
-            vec![(now - 300_000, Decimal::from(2)), (now - 1000, Decimal::new(216, 2))],
+            vec![
+                (now - 300_000, Decimal::from(2)),
+                (now - 1000, Decimal::new(216, 2)),
+            ],
             flow,
         );
         let c = evaluate_candidate_at(&p, now).expect("pool kuat harus jadi kandidat");

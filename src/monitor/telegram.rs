@@ -11,10 +11,12 @@ use tokio::sync::mpsc;
 use crate::events::MonitorMsg;
 
 /// Tombol kontrol utama — callback_data diproses di monitor::commands.
+/// /halt = emergency stop (§13); /stop = shutdown penuh.
 pub const KEYBOARD: &[&[(&str, &str)]] = &[&[
     ("📊 Status", "status"),
-    ("🛑 Stop", "stop"),
+    ("⛔ Halt", "halt"),
     ("▶️ Resume", "resume"),
+    ("🛑 Stop", "stop"),
 ]];
 
 #[derive(Clone)]

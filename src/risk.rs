@@ -6,7 +6,8 @@
 //!   3. Router allowlist — hanya kontrak ter-approve (§9)
 //!   4. Max transaction value (§9)
 //!   5. Quote/order TTL — order basi ditolak (§3.5)
-//!   6. Daily loss lock + circuit breaker (§7, §13)
+//!   6. Price impact — di atas ambang ditolak (§7: Route+Slippage+Price Impact)
+//!   7. Daily loss lock + circuit breaker (§7, §13)
 //!
 //! Blueprint §7: "Risk engine dapat memblokir trade secara deterministik" —
 //! `evaluate` murni fungsi state internal + intent, tanpa I/O.
@@ -16,8 +17,8 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::{Address, U256};
-use rust_decimal::Decimal;
 use rust_decimal::prelude::ToPrimitive;
+use rust_decimal::Decimal;
 
 use crate::config::{AppConfig, RiskCfg};
 use crate::domain::{RiskDecision, TradeIntent};
@@ -172,7 +173,18 @@ impl RiskEngine {
             )));
         }
 
-        // 6. Daily loss hard lock + circuit breaker (§7).
+        // 6. Price impact (§7: Route + Slippage + Price Impact) — order yang
+        // menggerakkan harga terlalu jauh ditolak sebelum simulasi.
+        if let Some(impact) = intent.price_impact_pct {
+            if impact > self.cfg.max_price_impact_pct {
+                checks.push(RiskDecision::reject(format!(
+                    "price impact {impact}% melebihi maksimum {}%",
+                    self.cfg.max_price_impact_pct
+                )));
+            }
+        }
+
+        // 7. Daily loss hard lock + circuit breaker (§7).
         if self.daily_lock_active(now) {
             checks.push(RiskDecision::reject(format!(
                 "daily loss limit {}% tercapai — hard lock sampai hari berganti",
@@ -303,6 +315,7 @@ base:
             value: U256::from(10_000_000_000_000_000u64), // 0.01 ETH
             score: 90,
             quote_ts_ms: now_ms(),
+            price_impact_pct: None,
         }
     }
 
@@ -374,5 +387,15 @@ base:
         assert!(!engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
         engine.resume();
         assert!(engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
+    }
+
+    #[test]
+    fn price_impact_di_atas_ambang_ditolak() {
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let mut i = intent(Side::Buy);
+        i.price_impact_pct = Some(Decimal::from(15)); // 15% > default 10%
+        assert!(!engine.evaluate(&i, 3_000).is_pass());
+        i.price_impact_pct = Some(Decimal::from(3));
+        assert!(engine.evaluate(&i, 3_000).is_pass());
     }
 }

@@ -19,13 +19,14 @@
 //! Private key WAJIB ada di env var (`cfg.private_key_env`). Tx ditandatangani
 //! locally dan dikirim via RPC, atau MEV RPC jika dikonfigurasi (`cfg.mev_rpc_url`).
 
-use alloy::network::TransactionBuilder;
+use alloy::network::{TransactionBuilder, TxSigner};
 use alloy::primitives::{Address, Bytes, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder, RootProvider};
 use alloy::rpc::types::eth::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::http::reqwest::Url;
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
+use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
 use crate::config::BaseCfg;
@@ -61,6 +62,13 @@ pub struct BaseOrder {
     pub side: Side,
     /// Timestamp pembuatan order (epoch ms) — untuk mengukur latensi e2e.
     pub ts_ms: i64,
+    /// Price impact estimasi dari quote (persen) — dicek risk gate (§7).
+    /// `None` = belum ada quote; gate price impact dilewati.
+    pub price_impact_pct: Option<Decimal>,
+    /// Calldata simulasi SELL balik untuk order BUY (blueprint §8:
+    /// "BUY simulation AND SELL simulation both must pass" — sellability /
+    /// honeypot check). Wajib ada bila `simulation.require_sell_sim` aktif.
+    pub reverse_calldata: Option<Vec<u8>>,
 }
 
 // ============================================================================
@@ -220,17 +228,22 @@ impl BaseExecutor {
 
     /// Eksekusi swap di DEX router (mode live — tx broadcast riil).
     ///
-    /// Tx ditandatangani locally dan dikirim via RPC.
-    /// Jika `mev_rpc_url` dikonfigurasi, tx dikirim ke MEV-protected endpoint
-    /// untuk menghindari front-running.
+    /// Pipeline eksplisit sesuai blueprint §8 (Build → Sign → Submit):
+    /// 1. **Build**: nonce, chain id, fee EIP-1559, dan gas limit diambil dari
+    ///    RPC lalu dipasang ke request (deterministik, tidak di-auto-fill
+    ///    wallet provider).
+    /// 2. **Sign**: tx ditandatangani locally oleh `PrivateKeySigner`; latensi
+    ///    signing diukur terpisah (metrik §13 `sign_latency`).
+    /// 3. **Submit**: envelope terkirim via RPC, atau MEV-protected RPC bila
+    ///    `mev_rpc_url` dikonfigurasi (perlindungan front-running).
     ///
-    /// # Parameter
-    /// - `router`: alamat kontrak router DEX (mis. Aerodrome Router)
-    /// - `calldata`: hasil encode ABI dari strategy layer (multicall/swap)
-    /// - `value`: ETH dalam wei yang dikirim bersama tx (untuk buy dengan ETH)
+    /// Private key tidak pernah keluar dari proses ini — hanya signature.
+    ///
+    /// # Return
+    /// `(tx_hash, sign_ms)` — hash tx dan latensi signing (ms) untuk metrics.
     ///
     /// # Errors
-    /// - RPC error saat send_transaction
+    /// - RPC error saat fetch nonce/fee/gas atau send
     /// - Signing error
     /// - MEV RPC URL tidak valid (jika dikonfigurasi)
     pub async fn execute_swap(
@@ -238,7 +251,7 @@ impl BaseExecutor {
         router: Address,
         calldata: Vec<u8>,
         value: U256,
-    ) -> Result<B256> {
+    ) -> Result<(B256, i64)> {
         // Pilih URL tujuan: MEV RPC jika ada, fallback ke regular RPC.
         let url = self
             .mev_rpc_url
@@ -246,24 +259,53 @@ impl BaseExecutor {
             .and_then(|s| s.parse::<Url>().ok())
             .unwrap_or_else(|| self.rpc_url.clone());
 
-        // Buat wallet provider on-demand dengan URL yang dipilih.
-        let provider = ProviderBuilder::new()
-            .wallet(self.signer.clone())
-            .connect_http(url);
+        // Read-only provider cukup — signing dilakukan manual di bawah (§9:
+        // signer terisolasi, key tidak pernah dikirim ke RPC).
+        let provider: RootProvider = RootProvider::new_http(url);
+        let from = self.signer.address();
 
-        // Bangun TransactionRequest:
-        // - from: signer address (auto-filled oleh wallet provider, tapi eksplisit untuk clarity)
-        // - to: router DEX
-        // - input: calldata (encoded ABI)
-        // - value: ETH yang dikirim
+        // ── BUILD: ambil parameter tx dari node secara paralel ──
+        let (nonce, chain_id, fees) = tokio::try_join!(
+            provider.get_transaction_count(from),
+            provider.get_chain_id(),
+            provider.estimate_eip1559_fees(),
+        )
+        .context("gagal fetch nonce/chain_id/fee dari RPC")?;
+
         let tx = TransactionRequest::default()
-            .with_from(self.signer.address())
+            .with_from(from)
             .with_to(router)
             .with_input(Bytes::from(calldata))
-            .with_value(value);
+            .with_value(value)
+            .with_nonce(nonce)
+            .with_chain_id(chain_id)
+            .with_max_fee_per_gas(fees.max_fee_per_gas)
+            .with_max_priority_fee_per_gas(fees.max_priority_fee_per_gas);
 
+        // Gas limit: estimasi node + buffer 20% (blueprint §8: Gas/Slippage check).
+        let gas_estimate = provider
+            .estimate_gas(tx.clone())
+            .await
+            .context("gagal estimate gas untuk tx swap")?;
+        let tx = tx.with_gas_limit(gas_estimate.saturating_mul(120) / 100);
+
+        let mut typed = tx
+            .build_typed_tx()
+            .map_err(|_| anyhow!("tx swap tidak lengkap untuk di-sign"))?;
+
+        // ── SIGN: local signing, latensi diukur (metrik §13 signing) ──
+        let sign_start = now_ms();
+        let signature = self
+            .signer
+            .sign_transaction(&mut typed)
+            .await
+            .context("gagal menandatangani tx swap")?;
+        let sign_ms = now_ms() - sign_start;
+
+        // ── SUBMIT: broadcast envelope yang sudah ditandatangani ──
+        let envelope = typed.into_envelope(signature);
         let pending = provider
-            .send_transaction(tx)
+            .send_tx_envelope(envelope)
             .await
             .context("gagal kirim tx swap ke DEX router")?;
         let hash = *pending.tx_hash();
@@ -272,10 +314,12 @@ impl BaseExecutor {
             %hash,
             %router,
             %value,
+            nonce,
+            sign_ms,
             mev = self.mev_rpc_url.is_some(),
             "tx swap terkirim"
         );
-        Ok(hash)
+        Ok((hash, sign_ms))
     }
 
     /// Simulasi swap (mode paper — tidak ada tx broadcast).
@@ -352,19 +396,20 @@ impl BaseExecutor {
 // RUNNER TASK
 // ============================================================================
 
-/// Task: konsumsi `BaseOrder` → **risk gate → simulation → submit** (§7/§8).
+/// Task: konsumsi `BaseOrder` → **risk gate → simulation (buy+sell) → submit** (§7/§8).
 ///
 /// Blueprint §8: "Tidak ada auto-buy langsung dari strategy signal. Semua
 /// transaksi melalui validation dan simulation."
 ///
 /// # Alur per order
 /// 1. **Risk gate** (`RiskEngine::evaluate`): armed, halt, allowlist, max
-///    value, quote TTL, daily loss, circuit breaker — deterministik. REJECT =
-///    order dibatalkan, dicatat (`risk_decided`), dialert.
-/// 2. **Simulation** (bila `simulator` ada): eth_call pre-submit. Revert =
-///    tx dibatalkan sebelum signing (tidak buang gas).
-/// 3. **Submit**: paper → simulasi lokal; live → broadcast via RPC/MEV RPC,
-///    lalu tunggu receipt — revert on-chain dihitung terpisah (§13).
+///    value, quote TTL, price impact, daily loss, circuit breaker —
+///    deterministik. REJECT = order dibatalkan, dicatat (`risk_decided`), dialert.
+/// 2. **Simulation** (bila `simulator` ada): eth_call pre-submit. Untuk order
+///    BUY dengan `reverse_calldata`, simulasi SELL balik juga wajib lolos
+///    (§8 sellability/honeypot check). Revert = tx dibatalkan sebelum signing.
+/// 3. **Submit**: paper → simulasi lokal; live → build→sign→submit via
+///    RPC/MEV RPC, lalu tunggu receipt — revert on-chain dihitung terpisah (§13).
 /// 4. Outcome dicatat ke risk engine (circuit breaker) + metrics + log.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_base_execution(
@@ -373,6 +418,7 @@ pub async fn run_base_execution(
     risk: SharedRiskEngine,
     simulator: Option<Simulator>,
     quote_ttl_ms: i64,
+    require_sell_sim: bool,
     tx_log: mpsc::Sender<LogEntry>,
     tx_monitor: mpsc::Sender<MonitorMsg>,
     metrics: crate::metrics::SharedMetrics,
@@ -381,7 +427,8 @@ pub async fn run_base_execution(
         paper = executor.paper_mode,
         simulation = simulator.is_some(),
         quote_ttl_ms,
-        "run_base_execution started — pipeline risk→sim→submit aktif (§7/§8)"
+        require_sell_sim,
+        "run_base_execution started — pipeline risk→sim(buy+sell)→submit aktif (§7/§8)"
     );
 
     while let Some(order) = rx.recv().await {
@@ -397,6 +444,7 @@ pub async fn run_base_execution(
             value: order.value,
             score: 0,
             quote_ts_ms: order.ts_ms,
+            price_impact_pct: order.price_impact_pct,
         };
         let decision = risk.evaluate(&intent, quote_ttl_ms);
         if let RiskDecision::Reject { reasons } = &decision {
@@ -438,14 +486,51 @@ pub async fn run_base_execution(
         }
 
         // ── GATE 2: Simulation pre-submit (§8) ──
+        // Blueprint §8: BUY simulation AND SELL simulation both must pass.
         if let Some(sim) = &simulator {
             let sim_result = sim
                 .simulate_tx(order.router, order.calldata.clone(), order.value)
                 .await;
             metrics.record_sim_latency(sim_result.latency_ms);
-            if !sim_result.ok {
+
+            // Simulasi SELL balik untuk order BUY (sellability / honeypot check).
+            // Catatan: sell sim berjalan pada state saat ini (sebelum buy
+            // dieksekusi), sehingga revert "insufficient balance" murni dari
+            // saldo token yang belum dimiliki TIDAK dianggap kegagalan di sini —
+            // yang ditolak adalah revert dari logika kontrak (transfer diblok,
+            // fee 100%, blacklist, dll.). Untuk deteksi honeypot penuh,
+            // gunakan require_sell_sim + calldata jual yang valid.
+            let sell_sim_error: Option<String> = if sim_result.ok && order.side == Side::Buy {
+                match &order.reverse_calldata {
+                    Some(reverse) => {
+                        let sell_result = sim
+                            .simulate_tx(order.router, reverse.clone(), U256::ZERO)
+                            .await;
+                        metrics.record_sim_latency(sell_result.latency_ms);
+                        if sell_result.ok {
+                            None
+                        } else {
+                            sell_result.error.clone().map(|e| format!("sell simulation: {e}"))
+                        }
+                    }
+                    None if require_sell_sim => Some(
+                        "sell simulation wajib (simulation.require_sell_sim) tetapi order tidak membawa reverse_calldata"
+                            .to_string(),
+                    ),
+                    None => None,
+                }
+            } else {
+                None
+            };
+
+            let sim_error = if !sim_result.ok {
+                sim_result.error.clone()
+            } else {
+                sell_sim_error
+            };
+
+            if let Some(err) = sim_error {
                 metrics.inc(&metrics.sim_failed);
-                let err = sim_result.error.clone().unwrap_or_default();
                 tracing::warn!(
                     strategy = %order.strategy,
                     pair = %order.pair,
@@ -480,6 +565,7 @@ pub async fn run_base_execution(
             executor
                 .execute_swap_paper(order.router, order.calldata.clone(), order.value)
                 .await
+                .map(|h| (h, 0i64))
         } else {
             executor
                 .execute_swap(order.router, order.calldata.clone(), order.value)
@@ -489,7 +575,10 @@ pub async fn run_base_execution(
         metrics.record_submit_ack_latency(submit_ack_ms);
 
         match result {
-            Ok(tx_hash) => {
+            Ok((tx_hash, sign_ms)) => {
+                if sign_ms > 0 {
+                    metrics.record_sign_latency(sign_ms);
+                }
                 // Confirm: mode live menunggu receipt; revert dihitung (§13).
                 let mut status = if executor.paper_mode {
                     ExecutionStatus::Simulated
@@ -525,7 +614,7 @@ pub async fn run_base_execution(
                     e2e_ms,
                     ts_ms: now_ms(),
                 };
-                tracing::info!(?status, %tx_hash, e2e_ms, submit_ack_ms, "swap base dieksekusi");
+                tracing::info!(?status, %tx_hash, e2e_ms, submit_ack_ms, sign_ms, "swap base dieksekusi");
 
                 let _ = tx_log
                     .send(LogEntry {

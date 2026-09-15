@@ -116,6 +116,7 @@
     <section id="overview" role="tabpanel" aria-labelledby="tab-overview">
       <div class="action-bar">
         <span class="action-note">Refresh otomatis setiap 5 detik. Tidak ada tombol untuk mengaktifkan perdagangan live.</span>
+        <button class="btn danger" id="haltBtn" type="button" onclick="doHalt()">Emergency halt</button>
         <button class="btn resume" id="resumeBtn" type="button" onclick="doResume()">Clear halt</button>
         <button class="btn danger" type="button" onclick="doStop()">Stop bot</button>
         <button class="btn" type="button" onclick="loadAll()">Muat ulang</button>
@@ -227,6 +228,7 @@ function connectWebSocket() {
 }
 async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
 async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); loadAll(); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
+async function doHalt() { if (!confirm('Emergency halt: hentikan SEMUA order buy baru sekarang? Monitoring tetap berjalan.')) return; try { await api('/api/halt', 'POST'); loadAll(); } catch (error) { alert(`Gagal halt: ${error.message}`); } }
 document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }));
 loadAll(); connectWebSocket(); setInterval(loadAll, 5000);
 </script>

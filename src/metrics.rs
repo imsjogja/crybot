@@ -19,6 +19,8 @@ pub struct Metrics {
     rpc_latency: Mutex<VecDeque<i64>>,
     /// Latensi simulasi eth_call pre-submit (§8/§13).
     sim_latency: Mutex<VecDeque<i64>>,
+    /// Latensi local signing (§13: "signing latency").
+    sign_latency: Mutex<VecDeque<i64>>,
     /// Latensi submit->ack (send_transaction -> tx hash) (§13).
     submit_ack_latency: Mutex<VecDeque<i64>>,
     pub master_fills: AtomicU64,
@@ -75,6 +77,8 @@ pub struct Snapshot {
     pub rpc_p95: Option<i64>,
     pub sim_p50: Option<i64>,
     pub sim_p95: Option<i64>,
+    pub sign_p50: Option<i64>,
+    pub sign_p95: Option<i64>,
     pub submit_p50: Option<i64>,
     pub submit_p95: Option<i64>,
     pub master_fills: u64,
@@ -105,6 +109,9 @@ impl Metrics {
     pub fn record_sim_latency(&self, ms: i64) {
         push(&self.sim_latency, ms);
     }
+    pub fn record_sign_latency(&self, ms: i64) {
+        push(&self.sign_latency, ms);
+    }
     pub fn record_submit_ack_latency(&self, ms: i64) {
         push(&self.submit_ack_latency, ms);
     }
@@ -127,6 +134,8 @@ impl Metrics {
             rpc_p95: percentile(&self.rpc_latency, 0.95),
             sim_p50: percentile(&self.sim_latency, 0.50),
             sim_p95: percentile(&self.sim_latency, 0.95),
+            sign_p50: percentile(&self.sign_latency, 0.50),
+            sign_p95: percentile(&self.sign_latency, 0.95),
             submit_p50: percentile(&self.submit_ack_latency, 0.50),
             submit_p95: percentile(&self.submit_ack_latency, 0.95),
             master_fills: self.master_fills.load(Ordering::Relaxed),
@@ -154,7 +163,7 @@ impl std::fmt::Display for Snapshot {
         let fmt_ms = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("-".into());
         write!(
             f,
-            "METRIK BASE | orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} submit p95: {}",
+            "METRIK BASE | orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} sign p95: {} submit p95: {}",
             self.orders,
             self.follower_fills,
             self.exec_errors,
@@ -168,6 +177,7 @@ impl std::fmt::Display for Snapshot {
             fmt_ms(self.e2e_p99),
             fmt_ms(self.rpc_p95),
             fmt_ms(self.sim_p95),
+            fmt_ms(self.sign_p95),
             fmt_ms(self.submit_p95),
         )
     }

@@ -19,14 +19,13 @@ environment variables documented by `.env.example`. Integration tests live in
 cp .env.example .env                         # create local secret configuration
 cargo run --release -- config/config.yaml    # run (paper mode is the default)
 cargo test                                   # run hermetic unit tests
-cargo test --test public_stream -- --ignored --nocapture  # live-network check
 cargo fmt --check                            # verify Rust formatting
 cargo clippy --all-targets -- -D warnings    # lint production and test code
 docker compose up -d --build                 # build and run the container
 ```
 
-Do not run ignored integration tests unless network access is intended.
-`testnet_account_access` additionally requires testnet follower credentials.
+All unit tests are hermetic (no network). Live-network checks against Base
+mainnet/testnet RPC should be run manually and never in CI by default.
 
 ## Coding Style & Naming Conventions
 

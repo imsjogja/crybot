@@ -78,6 +78,14 @@ pub struct RiskCfg {
     /// dan emergency stop otomatis (blueprint §7/§13). Default 5.
     #[serde(default = "default_circuit_breaker_errors")]
     pub circuit_breaker_consecutive_errors: u32,
+    /// Price impact maksimum (persen) yang masih boleh dieksekusi
+    /// (blueprint §7: "Route + Slippage + Price Impact check"). Default 10%.
+    #[serde(default = "default_max_price_impact_pct")]
+    pub max_price_impact_pct: Decimal,
+}
+
+fn default_max_price_impact_pct() -> Decimal {
+    Decimal::from(10)
 }
 
 fn default_max_tx_value_eth() -> Decimal {
@@ -99,6 +107,12 @@ pub struct SimulationCfg {
     /// (blueprint §3.5: "reject stale quotes"). Default 3000 ms.
     #[serde(default = "default_quote_ttl_ms")]
     pub quote_ttl_ms: i64,
+    /// Wajibkan simulasi SELL balik untuk order BUY (blueprint §8: "BUY
+    /// simulation AND SELL simulation both must pass"). Bila aktif, order BUY
+    /// tanpa `reverse_calldata` ditolak sebelum submit. Default false selama
+    /// strategi belum menghasilkan calldata jual yang valid.
+    #[serde(default)]
+    pub require_sell_sim: bool,
 }
 
 impl Default for SimulationCfg {
@@ -106,6 +120,7 @@ impl Default for SimulationCfg {
         Self {
             pre_submit: true,
             quote_ttl_ms: default_quote_ttl_ms(),
+            require_sell_sim: false,
         }
     }
 }

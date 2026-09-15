@@ -16,8 +16,7 @@
 use axum::{
     extract::{
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Query,
-        State,
+        Query, State,
     },
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Json},
@@ -212,18 +211,20 @@ async fn api_positions(State(st): State<Shared>, headers: HeaderMap) -> impl Int
 
     let positions: Vec<Value> = rows
         .into_iter()
-        .map(|(id, strategy, pair, side, entry_price, size, opened_at, pnl)| {
-            json!({
-                "id": id,
-                "strategy": strategy,
-                "pair": pair,
-                "side": side,
-                "entry_price": entry_price,
-                "size": size,
-                "opened_at": opened_at,
-                "pnl": pnl,
-            })
-        })
+        .map(
+            |(id, strategy, pair, side, entry_price, size, opened_at, pnl)| {
+                json!({
+                    "id": id,
+                    "strategy": strategy,
+                    "pair": pair,
+                    "side": side,
+                    "entry_price": entry_price,
+                    "size": size,
+                    "opened_at": opened_at,
+                    "pnl": pnl,
+                })
+            },
+        )
         .collect();
     Json(json!({"positions": positions})).into_response()
 }
@@ -367,10 +368,10 @@ async fn send_strategy_statuses(socket: &mut WebSocket, strategies: &StrategiesC
     for status in strategy_statuses(strategies) {
         let enabled = status["enabled"].as_bool().unwrap_or(false);
         let name = status["name"].as_str().unwrap_or("unknown").to_owned();
-       let payload = match serde_json::to_string(&WebWsMsg::Status {
-           strategy: name,
-           enabled,
-       }) {
+        let payload = match serde_json::to_string(&WebWsMsg::Status {
+            strategy: name,
+            enabled,
+        }) {
             Ok(payload) => payload,
             Err(error) => {
                 tracing::warn!(error = %error, "gagal serialisasi status WebSocket");

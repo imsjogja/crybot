@@ -92,9 +92,7 @@ impl PoolState {
 
     /// Volume aproksimasi (satuan token0 mentah) dalam window — blueprint §4 `volume_*`.
     pub fn volume_token0(&self, window_ms: i64, now: i64) -> Decimal {
-        self.flow_in_window(window_ms, now)
-            .map(|s| s.amount0)
-            .sum()
+        self.flow_in_window(window_ms, now).map(|s| s.amount0).sum()
     }
 
     /// Jumlah trade beli dalam window — blueprint §4 `buys_1m`.
@@ -116,13 +114,7 @@ impl PoolState {
         let threshold = Decimal::from_str_exact(WHALE_MIN_TOKEN0_RAW).unwrap_or(Decimal::MAX);
         self.flow_in_window(window_ms, now)
             .filter(|s| s.amount0 >= threshold)
-            .map(|s| {
-                if s.is_buy {
-                    s.amount0
-                } else {
-                    -s.amount0
-                }
-            })
+            .map(|s| if s.is_buy { s.amount0 } else { -s.amount0 })
             .sum()
     }
 
@@ -360,7 +352,12 @@ mod tests {
         let whale = U256::from_str_radix("1000000000000000000", 10).unwrap(); // 1e18
         m.on_pool_sync("0xpool", whale, whale, 1_000);
         // Whale buy: reserve0 naik 2e18.
-        m.on_pool_sync("0xpool", whale * U256::from(3u64), whale / U256::from(2u64), 2_000);
+        m.on_pool_sync(
+            "0xpool",
+            whale * U256::from(3u64),
+            whale / U256::from(2u64),
+            2_000,
+        );
         let p = m.pool("0xpool").unwrap();
         assert_eq!(
             p.whale_netflow_token0(60_000, 2_000),
