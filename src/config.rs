@@ -10,19 +10,13 @@ use std::path::Path;
 pub struct AppConfig {
     /// paper | testnet | live
     pub mode: Mode,
-    pub master: MasterCfg,
-    pub follower: FollowerCfg,
-    pub copy: CopyCfg,
     pub risk: RiskCfg,
     pub monitor: MonitorCfg,
     pub store: StoreCfg,
     #[serde(default)]
-    pub reconcile: ReconcileCfg,
-    #[serde(default)]
     pub web: WebCfg,
-    /// Konfigurasi Base Network (opsional — jika tidak ada, hanya Binance copy trading).
-    #[serde(default)]
-    pub base: Option<BaseCfg>,
+    /// Konfigurasi Base Network (wajib untuk bot Base).
+    pub base: BaseCfg,
     /// Konfigurasi strategi Base Network.
     #[serde(default)]
     pub strategies: StrategiesCfg,
@@ -47,38 +41,6 @@ impl Mode {
             _ => 84532,
         }
     }
-    /// Base URL WS API Binance (order entry + user data stream).
-    pub fn ws_api_url(&self) -> &'static str {
-        match self {
-            Mode::Live => "wss://ws-api.binance.com:443/ws-api/v3",
-            _ => "wss://ws-api.testnet.binance.vision/ws-api/v3",
-        }
-    }
-    pub fn rest_url(&self) -> &'static str {
-        match self {
-            Mode::Live => "https://api.binance.com",
-            _ => "https://testnet.binance.vision",
-        }
-    }
-    /// Stream market data publik (bookTicker) — selalu mainnet agar harga riil.
-    pub fn market_stream_url(&self) -> &'static str {
-        "wss://stream.binance.com:9443/stream"
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct MasterCfg {
-    pub api_key_env: String,
-    pub api_secret_env: String,
-    /// Dipakai untuk sizing equity-proportional bila akun tidak bisa diquery.
-    pub fallback_equity_usdt: Decimal,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct FollowerCfg {
-    pub api_key_env: String,
-    pub api_secret_env: String,
-    pub fallback_equity_usdt: Decimal,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -88,24 +50,6 @@ pub enum SizingModel {
     FixedAmount,
     #[default]
     FixedRatio,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CopyCfg {
-    pub sizing: SizingModel,
-    pub fixed_amount_usdt: Decimal,
-    pub fixed_ratio: Decimal,
-    /// Hard cap per trade — wajib ada (Bagian 4 blueprint).
-    pub max_per_trade_usdt: Decimal,
-    /// Di bawah minimum notional exchange -> SKIP, jangan dibulatkan naik.
-    pub min_notional_usdt: Decimal,
-    /// Slippage guard: deviasi harga vs fill master di atas ini -> SKIP.
-    pub slippage_guard_pct: Decimal,
-    /// Hanya pair dalam daftar ini yang disalin.
-    pub symbol_allowlist: Vec<String>,
-    pub max_open_positions: u32,
-    /// Blacklist perilaku: master > N trade/menit -> pause copying.
-    pub burst_max_trades_per_min: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -121,7 +65,7 @@ pub struct MonitorCfg {
     pub telegram_bot_token_env: String,
     pub telegram_chat_id_env: String,
     pub alert_on_fill: bool,
-    /// Interval laporan metrik (p50/p95/p99, skip rate) ke Telegram. 0 = nonaktif.
+    /// Interval laporan metrik (menit) ke Telegram. 0 = nonaktif.
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval_min: u64,
     /// Perintah interaktif /status /stop /resume via getUpdates polling.
@@ -142,13 +86,13 @@ pub struct StoreCfg {
     pub sqlite_path: String,
 }
 
-/// Dashboard web (Bagian 7 blueprint — UI visual).
+/// Dashboard web.
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebCfg {
     /// Aktif/nonaktifkan HTTP server dashboard.
     #[serde(default = "default_web_enabled")]
     pub enabled: bool,
-    /// Alamat bind. WAJIB 127.0.0.1 kecuali di belakang reverse proxy TLS.
+    /// Alamat bind. Di dalam container WAJIB 0.0.0.0:8080.
     #[serde(default = "default_web_bind")]
     pub bind: String,
 }
@@ -170,23 +114,6 @@ fn default_web_bind() -> String {
     "127.0.0.1:8080".into()
 }
 
-impl Default for ReconcileCfg {
-    fn default() -> Self {
-        Self {
-            interval_min: 60,
-            tolerance_pct: Decimal::from(1),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct ReconcileCfg {
-    /// Interval rekonsiliasi posisi vs exchange (menit). 0 = nonaktif.
-    pub interval_min: u64,
-    /// Toleransi deviasi relatif (%) sebelum alert kritis.
-    pub tolerance_pct: Decimal,
-}
-
 impl AppConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let raw = std::fs::read_to_string(path)
@@ -196,27 +123,17 @@ impl AppConfig {
     }
 }
 
-/// Ambil rahasia dari env — gagal keras bila mode non-paper dan key kosong.
-pub fn env_secret(name: &str, required: bool) -> Result<String> {
-    match std::env::var(name) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ if required => anyhow::bail!("env var {name} wajib diisi untuk mode ini"),
-        _ => Ok(String::new()),
-    }
-}
-
 // ============================================================================
 // BASE NETWORK CONFIG
 // ============================================================================
 
-/// Konfigurasi koneksi Base Network.
 #[derive(Debug, Clone, Deserialize)]
 pub struct BaseCfg {
-    /// WebSocket URL (wss://) — wajib untuk Flashblocks & log subscription.
+    /// WebSocket URL (wss://) — untuk feed layer.
     pub ws_url: String,
     /// HTTP URL (https://) — untuk REST calls & tx broadcast.
     pub http_url: String,
-    /// Aktifkan Flashblock pre-confirmation subscriptions (200ms latency).
+    /// Aktifkan Flashblock pre-confirmation subscriptions.
     #[serde(default = "default_true")]
     pub flashblocks: bool,
     /// MEV-protected RPC untuk tx submission (opsional).
@@ -300,23 +217,16 @@ pub struct StrategiesCfg {
     pub perps: PerpsCfg,
 }
 
-/// 1. Token Sniping (Gems Hunting)
 #[derive(Debug, Clone, Deserialize)]
 pub struct SniperCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Router addresses yang dimonitor untuk PoolCreated events.
     #[serde(default)]
     pub dex_factories: Vec<String>,
-    /// Max ETH yang dibelanjakan per snipe.
     pub max_buy_eth: Decimal,
-    /// Min liquidity ETH di pool baru untuk dipertimbangkan.
     pub min_liquidity_eth: Decimal,
-    /// Take profit otomatis (%).
     pub auto_tp_pct: Decimal,
-    /// Stop loss otomatis (%).
     pub auto_sl_pct: Decimal,
-    /// Safety checks.
     #[serde(default)]
     pub safety: SafetyCfg,
 }
@@ -326,8 +236,8 @@ impl Default for SniperCfg {
         Self {
             enabled: false,
             dex_factories: Vec::new(),
-            max_buy_eth: Decimal::new(5, 2), // 0.05
-            min_liquidity_eth: Decimal::ONE, // 1.0
+            max_buy_eth: Decimal::new(5, 2),
+            min_liquidity_eth: Decimal::ONE,
             auto_tp_pct: Decimal::from(50),
             auto_sl_pct: Decimal::from(20),
             safety: SafetyCfg::default(),
@@ -341,7 +251,6 @@ pub struct SafetyCfg {
     pub check_ownership_renounced: bool,
     pub check_lp_locked: bool,
     pub check_holder_distribution: bool,
-    /// Max single holder % ( jika > ini → skip).
     pub max_holder_pct: Decimal,
 }
 
@@ -357,27 +266,20 @@ impl Default for SafetyCfg {
     }
 }
 
-/// 2. Copy Trading On-Chain
 #[derive(Debug, Clone, Deserialize)]
 pub struct CopyOnChainCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Daftar wallet yang ditrack.
     #[serde(default)]
     pub target_wallets: Vec<WalletTargetCfg>,
-    /// Slippage dalam basis points (100 = 1%).
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u32,
-    /// Sizing model.
     #[serde(default)]
     pub sizing: SizingModel,
-    /// Rasio copy (untuk fixed_ratio).
     #[serde(default = "default_copy_ratio")]
     pub copy_ratio: Decimal,
-    /// Min tx ETH wallet target untuk dicopy.
     #[serde(default = "default_min_tx_eth")]
     pub min_tx_eth: Decimal,
-    /// Max tx ETH wallet target untuk dicopy.
     #[serde(default = "default_max_tx_eth")]
     pub max_tx_eth: Decimal,
 }
@@ -414,16 +316,15 @@ fn default_slippage_bps() -> u32 {
     300
 }
 fn default_copy_ratio() -> Decimal {
-    Decimal::new(1, 1) // 0.1
+    Decimal::new(1, 1)
 }
 fn default_min_tx_eth() -> Decimal {
-    Decimal::new(1, 2) // 0.01
+    Decimal::new(1, 2)
 }
 fn default_max_tx_eth() -> Decimal {
     Decimal::ONE
 }
 
-/// 3. Grid Trading & DCA
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct GridDcaCfg {
     #[serde(default)]
@@ -456,18 +357,14 @@ pub struct DcaCfg {
     pub dex_router: String,
 }
 
-/// 4. DEX Arbitrage
 #[derive(Debug, Clone, Deserialize)]
 pub struct ArbitrageCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Min profit ETH setelah gas + flash loan fee.
     #[serde(default = "default_min_profit_eth")]
     pub min_profit_eth: Decimal,
-    /// Max gas gwei yang masih profitable.
     #[serde(default = "default_max_gas_gwei")]
     pub max_gas_gwei: u64,
-    /// Daftar pool yang dimonitor.
     #[serde(default)]
     pub monitored_pools: Vec<PoolCfg>,
 }
@@ -484,7 +381,7 @@ impl Default for ArbitrageCfg {
 }
 
 fn default_min_profit_eth() -> Decimal {
-    Decimal::new(1, 3) // 0.001
+    Decimal::new(1, 3)
 }
 fn default_max_gas_gwei() -> u64 {
     5
@@ -500,18 +397,14 @@ pub struct PoolCfg {
     pub fee_bps: u32,
 }
 
-/// 5. LP / Yield Farming
 #[derive(Debug, Clone, Deserialize)]
 pub struct YieldCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Auto-compound interval (jam).
     #[serde(default = "default_compound_interval_hours")]
     pub auto_compound_interval_hours: u64,
-    /// Min fee ETH untuk trigger auto-compound.
     #[serde(default = "default_min_fee_threshold")]
     pub min_fee_threshold_eth: Decimal,
-    /// Posisi LP yang dikelola.
     #[serde(default)]
     pub positions: Vec<PositionCfg>,
 }
@@ -531,7 +424,7 @@ fn default_compound_interval_hours() -> u64 {
     6
 }
 fn default_min_fee_threshold() -> Decimal {
-    Decimal::new(1, 3) // 0.001
+    Decimal::new(1, 3)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -546,19 +439,14 @@ pub struct PositionCfg {
     pub auto_compound: bool,
 }
 
-/// 6. Perps Trading
 #[derive(Debug, Clone, Deserialize)]
 pub struct PerpsCfg {
     #[serde(default)]
     pub enabled: bool,
-    /// Max leverage.
     #[serde(default = "default_max_leverage")]
     pub max_leverage: u32,
-    /// ExchangeRouter address (GMX V2 — verifikasi saat implementasi).
     pub exchange_router: Option<String>,
-    /// Reader contract address.
     pub reader: Option<String>,
-    /// Posisi perps yang dikelola.
     #[serde(default)]
     pub positions: Vec<PerpsPositionCfg>,
 }

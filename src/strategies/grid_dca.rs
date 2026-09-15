@@ -1,6 +1,6 @@
 //! Strategi grid trading dan dollar cost averaging (DCA) yang aman untuk mode paper.
 //!
-//! Modul ini hanya menerbitkan `SignalEvent`. Konfigurasi grid/DCA belum memuat
+//! Modul ini hanya menerbitkan log/alert observasional. Konfigurasi grid/DCA belum memuat
 //! calldata swap yang tervalidasi, sehingga strategi tidak pernah membuat
 //! `BaseOrder` dengan calldata kosong yang dapat terkirim pada mode live.
 
@@ -114,14 +114,6 @@ impl GridDcaStrategy {
             }
 
             self.last_triggered_level.insert(key, level);
-            ctx.send_signal(
-                pair,
-                side,
-                grid.amount_per_grid,
-                grid.amount_per_grid * price,
-                price,
-            )
-            .await;
             ctx.log(
                 "grid_signal",
                 format!(
@@ -156,8 +148,6 @@ impl GridDcaStrategy {
                 continue;
             }
 
-            ctx.send_signal(pair, Side::Buy, amount, amount, Decimal::ZERO)
-                .await;
             ctx.log(
                 "dca_signal",
                 format!(

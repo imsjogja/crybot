@@ -1,2 +1,3 @@
+//! Feed connectors — Base Network only.
+
 pub mod base;
-pub mod binance;

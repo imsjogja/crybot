@@ -1,42 +1,18 @@
-# Template deployment Docker yang mengaktifkan dashboard operator.
+# Template deployment Docker — Base Network only.
 # Salin menjadi config/production.yaml (file tersebut diabaikan Git).
 #
 # Bind dashboard WAJIB 0.0.0.0:8080 DI DALAM container agar terjangkau
 # docker-proxy; Compose hanya mempublikasikannya ke 127.0.0.1:8080 host dan
-# Caddy meneruskan TLS dari crybot.dna-server.cloud — tidak pernah terbuka
-# langsung ke internet.
+# Caddy meneruskan TLS dari crybot.dna-server.cloud.
 #
 # Keamanan API: isi DASHBOARD_TOKEN di .env. Bila terisi, semua /api/*
 # wajib header `Authorization: Bearer <token>`.
 mode: paper
 
-master:
-  api_key_env: MASTER_API_KEY
-  api_secret_env: MASTER_API_SECRET
-  fallback_equity_usdt: "10000"
-
-follower:
-  api_key_env: FOLLOWER_API_KEY
-  api_secret_env: FOLLOWER_API_SECRET
-  fallback_equity_usdt: "1000"
-
-copy:
-  sizing: equity_proportional
-  fixed_amount_usdt: "50"
-  fixed_ratio: "0.1"
-  max_per_trade_usdt: "200"
-  min_notional_usdt: "5.1"
-  slippage_guard_pct: "0.4"
-  symbol_allowlist:
-    - BTCUSDT
-    - ETHUSDT
-  max_open_positions: 3
-  burst_max_trades_per_min: 20
-
 risk:
   daily_loss_limit_pct: "3"
   kill_switch_drawdown_pct: "10"
-  # Biarkan false sampai validasi paper dan testnet selesai.
+  # Biarkan false sampai validasi paper/testnet selesai.
   armed: false
 
 monitor:
@@ -48,20 +24,10 @@ monitor:
 store:
   sqlite_path: data/events.db
 
-# Dashboard web (UI + REST API + WebSocket) — schema baru kunci `web`.
-# Kunci lama monitor.dashboard_* sudah tidak dipakai lagi.
 web:
   enabled: true
   bind: "0.0.0.0:8080"
 
-reconcile:
-  interval_min: 60
-  tolerance_pct: "1"
-
-# ============================================================================
-# BASE NETWORK — read-only saat paper (provider HTTP, tanpa signer riil).
-# Untuk mode live, isi BASE_PRIVATE_KEY di .env (nama env-nya: private_key_env).
-# ============================================================================
 base:
   ws_url: "wss://base-flashblocks.coinbase.com/v1/ws/base"
   http_url: "https://mainnet.base.org"
@@ -69,10 +35,6 @@ base:
   mev_rpc_url: null
   private_key_env: BASE_PRIVATE_KEY
 
-# ============================================================================
-# STRATEGI BASE NETWORK — semua default enabled: false (aman). Aktifkan
-# bertahap HANYA setelah validasi paper.
-# ============================================================================
 strategies:
   sniper:
     enabled: false

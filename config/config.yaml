@@ -1,46 +1,15 @@
-# Konfigurasi crypto-copy-bot — parameter non-rahasia saja.
-# Rahasia (API key) HANYA lewat .env — lihat .env.example.
+# Konfigurasi crybot — Base Network trading bot.
+# Parameter non-rahasia saja; rahasia (private key) HANYA lewat .env.
 
-# paper   : simulasi fill di harga pasar (default aman, tanpa order riil)
-# testnet : order riil ke testnet Binance
-# live    : order riil ke mainnet (WAJIB armed=true secara sadar)
+# paper   : simulasi, tidak ada tx broadcast (aman default)
+# testnet : tx riil ke Base testnet/sepolia
+# live    : tx riil ke Base mainnet (WAJIB armed=true secara sadar)
 mode: paper
-
-master:
-  # Nama env var berisi API key READ-ONLY akun master (bukan key-nya langsung!)
-  api_key_env: MASTER_API_KEY
-  api_secret_env: MASTER_API_SECRET
-  # Dipakai bila query equity master gagal
-  fallback_equity_usdt: "10000"
-
-follower:
-  api_key_env: FOLLOWER_API_KEY
-  api_secret_env: FOLLOWER_API_SECRET
-  fallback_equity_usdt: "1000"
-
-copy:
-  # equity_proportional | fixed_amount | fixed_ratio
-  sizing: equity_proportional
-  fixed_amount_usdt: "50"
-  fixed_ratio: "0.1"
-  # Hard cap per trade — typo config tidak boleh membuat order raksasa
-  max_per_trade_usdt: "200"
-  # Di bawah minimum notional Binance (5 USDT) -> SKIP, jangan dibulatkan naik
-  min_notional_usdt: "5.1"
-  # Slippage guard: deviasi harga vs fill master di atas ini -> SKIP
-  slippage_guard_pct: "0.4"
-  # Hanya pair ini yang disalin (format Binance, tanpa slash)
-  symbol_allowlist:
-    - BTCUSDT
-    - ETHUSDT
-  max_open_positions: 3
-  # Master > N trade/menit -> pause copying (deteksi perilaku anomali)
-  burst_max_trades_per_min: 20
 
 risk:
   daily_loss_limit_pct: "3"
   kill_switch_drawdown_pct: "10"
-  # false = tidak ada order sama sekali. Set true HANYA setelah paper/testnet lolos.
+  # false = bot tidak mengirim order apa pun. Set true HANYA setelah paper/testnet lolos.
   armed: false
 
 monitor:
@@ -56,38 +25,19 @@ store:
 # Dashboard web — UI visual untuk pengguna awam
 web:
   enabled: true
-  # WAJIB 127.0.0.1 kecuali di belakang reverse proxy TLS.
-  # Akses dari laptop: ssh -L 8080:127.0.0.1:8080 user@vps
-  bind: "127.0.0.1:8080"
+  # WAJIB 0.0.0.0 di dalam container; akses lokal pakai SSH tunnel.
+  bind: "0.0.0.0:8080"
 
-reconcile:
-  # Rekonsiliasi posisi lokal vs exchange tiap N menit (0 = nonaktif).
-  # Otomatis nonaktif di mode paper.
-  interval_min: 60
-  # Drift di atas ini (%) -> alert kritis
-  tolerance_pct: "1"
-
-# ============================================================================
-# BASE NETWORK
-# ============================================================================
+# Base Network connection
 base:
-  # WebSocket endpoint — Flashblocks via Coinbase L2 feed (wss://...)
   ws_url: "wss://base-flashblocks.coinbase.com/v1/ws/base"
-  # HTTP endpoint untuk RPC calls (public or paid RPC)
   http_url: "https://mainnet.base.org"
-  # Flashblock pre-confirmation subscriptions (200ms latency)
   flashblocks: true
-  # MEV-protected RPC (opsional — kosongkan untuk public RPC)
   mev_rpc_url: null
-  # Nama env var berisi private key (BUKAN key-nya langsung!)
   private_key_env: BASE_PRIVATE_KEY
-  # Alamat kontrak default sudah di-source code (BaseAddresses::default())
 
-# ============================================================================
-# STRATEGI BASE NETWORK — semua default enabled: false (aman)
-# ============================================================================
+# Strategi Base Network — semua default disabled (aman)
 strategies:
-  # 1. Token Sniping (Gems Hunting) — monitor PoolCreated, auto-buy token baru
   sniper:
     enabled: false
     max_buy_eth: "0.05"
@@ -101,7 +51,6 @@ strategies:
       check_holder_distribution: true
       max_holder_pct: "5"
 
-  # 2. Copy Trading On-Chain — track wallet target, copy swap on-chain
   copy_onchain:
     enabled: false
     slippage_bps: 300
@@ -111,27 +60,23 @@ strategies:
     max_tx_eth: "1.0"
     target_wallets: []
 
-  # 3. Grid Trading & DCA — grid orders + dollar cost averaging
   grid_dca:
     enabled: false
     grids: []
     dca_plans: []
 
-  # 4. DEX Arbitrage — selisih harga antar DEX
   arbitrage:
     enabled: false
     min_profit_eth: "0.001"
     max_gas_gwei: 5
     monitored_pools: []
 
-  # 5. LP / Yield Farming — liquidity provision + auto-compound
   yield_farming:
     enabled: false
     auto_compound_interval_hours: 6
     min_fee_threshold_eth: "0.001"
     positions: []
 
-  # 6. Perps Trading — kontrak berjangka terdesentralisasi (GMX V2)
   perps:
     enabled: false
     max_leverage: 10

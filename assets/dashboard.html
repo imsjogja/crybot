@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>crybot Base Network — Dashboard</title>
+  <title>crybot — Base Network Dashboard</title>
   <style>
     :root {
       --bg: #080b14; --surface: #111726; --surface-2: #171f31; --border: #2a354c;
@@ -35,7 +35,6 @@
     .notice { display: none; border: 1px solid var(--border); border-left: 4px solid var(--yellow); background: rgba(241, 188, 78, .08); color: var(--text); border-radius: 9px; padding: 12px 14px; margin-bottom: 16px; }
     .notice p { color: var(--muted); margin-top: 3px; font-size: 13px; }
     .notice.live { border-left-color: var(--red); background: rgba(255, 113, 132, .08); }
-    .notice.live p { color: var(--text); }
     .token-box { display: none; margin-bottom: 16px; padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--surface); }
     .token-box label { display: block; margin: 10px 0 5px; font-weight: 700; }
     .token-box input { width: min(480px, 100%); color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 9px 11px; }
@@ -51,7 +50,8 @@
     .card.full { grid-column: 1 / -1; }
     .card h2 { font-size: 14px; }
     .card > p { font-size: 13px; color: var(--muted); margin-top: 5px; }
-    .metric { font-size: 28px; font-weight: 780; letter-spacing: -.03em; margin: 12px 0 9px; }
+    .metric { font-size: 28px; font-weight: 780; letter-spacing: -.03em; margin: 12px 0 9px; word-break: break-all; }
+    .metric.small { font-size: 18px; }
     .rows { margin-top: 10px; }
     .row { display: flex; justify-content: space-between; gap: 12px; padding: 8px 0; border-bottom: 1px dashed var(--border); font-size: 13px; }
     .row:last-child { border: 0; }
@@ -80,15 +80,15 @@
     .feature-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(205px, 1fr)); gap: 11px; }
     .info-box { padding: 13px; border-radius: 9px; background: var(--surface-2); border: 1px solid var(--border); }
     .info-box h3 { font-size: 13px; }
-    .info-box p { margin-top: 5px; color: var(--muted); font-size: 13px; }
+    .info-box p { margin-top: 5px; color: var(--muted); font-size: 13px; word-break: break-all; }
     .status-line { display: flex; gap: 7px; align-items: flex-start; color: var(--muted); font-size: 13px; margin-top: 11px; }
     .footer { color: var(--muted); font-size: 12px; text-align: center; padding: 20px 0 2px; }
-    @media (max-width: 800px) { body { padding: 13px; } .header-meta { margin-left: 0; width: 100%; } .card, .card.wide { grid-column: 1 / -1; } .metric { font-size: 25px; } }
+    @media (max-width: 800px) { body { padding: 13px; } .header-meta { margin-left: 0; width: 100%; } .card, .card.wide { grid-column: 1 / -1; } .metric { font-size: 20px; } }
   </style>
 </head>
 <body>
   <header class="app-header">
-    <div class="brand"><div class="brand-mark" aria-hidden="true">C</div><div><h1>crybot Base Network</h1><div class="subtle">Dashboard bot untuk pemula</div></div></div>
+    <div class="brand"><div class="brand-mark" aria-hidden="true">C</div><div><h1>crybot Base Network</h1><div class="subtle">Dashboard bot on-chain</div></div></div>
     <div class="header-status" aria-label="Status bot">
       <span id="modeBadge" class="badge info">MEMUAT</span>
       <span id="armedBadge" class="badge info">risk.armed: —</span>
@@ -97,9 +97,9 @@
     <div class="header-meta"><span id="wsBadge" class="badge info"><i class="connection-dot"></i>Memeriksa koneksi</span><span id="uptime">uptime —</span></div>
   </header>
 
-  <section id="demoBanner" class="notice" role="status"><strong>Bot tidak dapat dijangkau</strong><p>Data terbaru belum tersedia. Dashboard akan mencoba memuat ulang otomatis; tindakan ke server mungkin gagal sampai koneksi pulih.</p></section>
+  <section id="demoBanner" class="notice" role="status"><strong>Bot tidak dapat dijangkau</strong><p>Data terbaru belum tersedia. Dashboard akan mencoba memuat ulang otomatis.</p></section>
   <section id="safetyBanner" class="notice" role="alert"></section>
-  <section id="tokenBox" class="token-box" aria-labelledby="tokenTitle"><strong id="tokenTitle">Dashboard memerlukan token</strong><p class="muted">Masukkan DASHBOARD_TOKEN dari server Anda. Token hanya disimpan di browser ini dan tidak ditampilkan kembali.</p><label for="tokenInput">Dashboard token</label><input id="tokenInput" type="password" autocomplete="off" placeholder="Tempel token di sini"><div style="margin-top:10px"><button class="btn primary" type="button" onclick="saveToken()">Simpan dan muat ulang</button></div></section>
+  <section id="tokenBox" class="token-box" aria-labelledby="tokenTitle"><strong id="tokenTitle">Dashboard memerlukan token</strong><p class="muted">Masukkan DASHBOARD_TOKEN dari server Anda. Token hanya disimpan di browser ini.</p><label for="tokenInput">Dashboard token</label><input id="tokenInput" type="password" autocomplete="off" placeholder="Tempel token di sini"><div style="margin-top:10px"><button class="btn primary" type="button" onclick="saveToken()">Simpan dan muat ulang</button></div></section>
 
   <nav class="tabs" aria-label="Bagian dashboard" role="tablist">
     <button class="tab" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview" data-tab="overview">Overview</button>
@@ -115,42 +115,37 @@
   <main>
     <section id="overview" role="tabpanel" aria-labelledby="tab-overview">
       <div class="action-bar">
-        <span class="action-note">Refresh otomatis setiap 5 detik. <strong>Tidak ada tombol untuk mengaktifkan perdagangan live.</strong></span>
+        <span class="action-note">Refresh otomatis setiap 5 detik. Tidak ada tombol untuk mengaktifkan perdagangan live.</span>
         <button class="btn resume" id="resumeBtn" type="button" onclick="doResume()">Clear halt</button>
         <button class="btn danger" type="button" onclick="doStop()">Stop bot</button>
         <button class="btn" type="button" onclick="loadAll()">Muat ulang</button>
       </div>
       <div class="grid">
-        <article class="card"><h2>Ekuitas dan hasil</h2><p>Nilai akun serta untung/rugi yang dicatat bot.</p><div class="metric" id="equity">—</div><div class="rows"><div class="row"><span>PnL hari ini</span><span id="pnlToday">—</span></div><div class="row"><span>PnL total terealisasi</span><span id="pnlTotal">—</span></div><div class="row"><span>Belum terealisasi</span><span id="pnlUnreal">—</span></div><div class="row"><span>Win rate</span><span id="winRate">—</span></div></div></article>
-        <article class="card" id="safetyCard"><h2>Keamanan eksekusi</h2><p>Periksa ini sebelum menilai hasil atau melanjutkan bot.</p><div class="metric" id="safetyState">—</div><div class="rows"><div class="row"><span>Mode</span><span id="safeMode">—</span></div><div class="row"><span>risk.armed</span><span id="safeArmed">—</span></div><div class="row"><span>Halt pengaman</span><span id="safeHalt">—</span></div></div></article>
-        <article class="card"><h2>Kesehatan data</h2><p>Harga yang basi dapat membuat keputusan tidak akurat.</p><div class="metric" id="priceAge">—</div><div class="rows"><div class="row"><span>Deteksi p50 / p95 / p99</span><span id="latDet">—</span></div><div class="row"><span>Order hingga fill p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
-        <article class="card wide"><h2>Aktivitas copy</h2><p>Ringkasan sinyal dari wallet/master yang sedang dipantau oleh konfigurasi bot.</p><div class="rows"><div class="row"><span>Fill master terdeteksi</span><span id="mFills">—</span></div><div class="row"><span>Sinyal lolos / dilewati</span><span id="mSig">—</span></div><div class="row"><span>Skip rate</span><span id="mSkip">—</span></div><div class="row"><span>Order → fill follower</span><span id="mOrd">—</span></div><div class="row"><span>Error eksekusi</span><span id="mErr">—</span></div></div></article>
-        <article class="card"><h2>Cakupan bot</h2><p>Pair yang dilaporkan API status.</p><div class="metric" id="pairCount">—</div><div class="muted" id="pairs">Menunggu data…</div></article>
-        <article class="card full"><h2>Posisi terbuka</h2><p>Posisi dan valuasi saat ini. Jika endpoint posisi khusus belum tersedia, data ini berasal dari status bot.</p><div id="posTable" class="empty">Memuat posisi…</div></article>
+        <article class="card"><h2>Wallet bot</h2><p>Alamat signer yang dipakai bot untuk tx Base.</p><div class="metric small" id="walletAddress">—</div></article>
+        <article class="card"><h2>RPC Base</h2><p>Endpoint HTTP yang digunakan bot.</p><div class="metric small" id="baseRpc">—</div></article>
+        <article class="card" id="safetyCard"><h2>Keamanan eksekusi</h2><p>Periksa ini sebelum menilai hasil.</p><div class="metric" id="safetyState">—</div><div class="rows"><div class="row"><span>Mode</span><span id="safeMode">—</span></div><div class="row"><span>risk.armed</span><span id="safeArmed">—</span></div><div class="row"><span>Halt pengaman</span><span id="safeHalt">—</span></div></div></article>
+        <article class="card"><h2>Metrik eksekusi</h2><p>Order, fill, dan error dari Base executor.</p><div class="rows"><div class="row"><span>Orders</span><span id="mOrders">—</span></div><div class="row"><span>Fills</span><span id="mFills">—</span></div><div class="row"><span>Errors</span><span id="mErrors">—</span></div></div></article>
+        <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
+        <article class="card"><h2>Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
+        <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
       </div>
     </section>
 
-    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden><div class="feature"><h2>Token Sniper</h2><p>Untuk membeli token baru dengan aturan ketat. crybot saat ini belum menyediakan kontrol atau konfigurasi sniper melalui dashboard.</p><div class="feature-grid"><div class="info-box"><h3>Status strategi</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div><div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div></div></div></section>
-    <section id="copy" role="tabpanel" aria-labelledby="tab-copy" hidden><div class="feature"><h2>Copy Wallet</h2><p>Bot dapat melaporkan aktivitas copy yang ada. Pengaturan wallet master tetap dilakukan melalui konfigurasi server.</p><div class="feature-grid"><div class="info-box"><h3>Sinyal yang diproses</h3><p id="copySummary">Memuat data status…</p></div><div class="info-box"><h3>Untuk pemula</h3><p>Copy trading tidak menjamin hasil master akan sama. Ukuran akun, harga fill, dan aturan risiko dapat berbeda.</p></div></div></div></section>
-    <section id="grid" role="tabpanel" aria-labelledby="tab-grid" hidden><div class="feature"><h2>Grid &amp; DCA</h2><p>Grid membagi order di rentang harga; DCA membeli berkala. Keduanya belum dapat diatur dari dashboard ini.</p><div class="info-box"><h3>Keamanan</h3><p>Jangan menganggap strategi otomatis bebas risiko. Tentukan anggaran maksimum dan skenario harga terus turun sebelum mengaktifkan dari konfigurasi bot.</p></div></div></section>
-    <section id="arbitrage" role="tabpanel" aria-labelledby="tab-arbitrage" hidden><div class="feature"><h2>Arbitrage</h2><p>Arbitrage mencari perbedaan harga, tetapi biaya, slippage, dan keterlambatan dapat menghapus peluang. Belum ada strategi arbitrage yang dapat dikendalikan dari UI.</p><div class="info-box"><h3>Status</h3><p id="strategyArbitrage">Memeriksa endpoint strategi…</p></div></div></section>
-    <section id="yield" role="tabpanel" aria-labelledby="tab-yield" hidden><div class="feature"><h2>Yield/LP</h2><p>Yield dan liquidity pool berisiko termasuk impermanent loss serta risiko smart contract. Dashboard ini bersifat baca-saja dan belum terhubung ke pengelolaan LP.</p><div class="info-box"><h3>Status</h3><p id="strategyYield">Memeriksa endpoint strategi…</p></div></div></section>
-    <section id="perps" role="tabpanel" aria-labelledby="tab-perps" hidden><div class="feature"><h2>Perps</h2><p>Perpetual futures memiliki leverage dan risiko likuidasi. Tidak ada kontrol leverage atau pembukaan posisi perps di UI ini.</p><div class="info-box"><h3>Status</h3><p id="strategyPerps">Memeriksa endpoint strategi…</p></div></div></section>
-    <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden><div class="feature"><h2>Riwayat aktivitas</h2><p>Fill follower, error eksekusi, dan peringatan rekonsiliasi terbaru dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></div></section>
+    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden><div class="feature"><h2>Token Sniper</h2><p>Monitoring pool/token baru di Base. crybot saat ini belum menyediakan kontrol sniper melalui dashboard.</p><div class="feature-grid"><div class="info-box"><h3>Status strategi</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div><div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div></div></div></section>
+    <section id="copy" role="tabpanel" aria-labelledby="tab-copy" hidden><div class="feature"><h2>Copy Wallet</h2><p>Bot dapat melaporkan aktivitas wallet target on-chain. Pengaturan wallet tetap dilakukan melalui konfigurasi server.</p><div class="feature-grid"><div class="info-box"><h3>Status</h3><p id="copySummary">Memuat data status…</p></div><div class="info-box"><h3>Untuk pemula</h3><p>Copy trading on-chain tidak menjamin hasil sama. Slippage, gas, dan kecepatan block dapat berbeda.</p></div></div></div></section>
+    <section id="grid" role="tabpanel" aria-labelledby="tab-grid" hidden><div class="feature"><h2>Grid &amp; DCA</h2><p>Grid membagi order di rentang harga; DCA membeli berkala. Keduanya belum dapat diatur dari dashboard ini.</p><div class="info-box"><h3>Keamanan</h3><p>Jangan menganggap strategi otomatis bebas risiko. Tentukan anggaran maksimum sebelum mengaktifkan dari konfigurasi bot.</p></div></div></section>
+    <section id="arbitrage" role="tabpanel" aria-labelledby="tab-arbitrage" hidden><div class="feature"><h2>Arbitrage</h2><p>Arbitrage mencari perbedaan harga antar DEX di Base, tetapi biaya, slippage, dan gas dapat menghapus peluang.</p><div class="info-box"><h3>Status</h3><p id="strategyArbitrage">Memeriksa endpoint strategi…</p></div></div></section>
+    <section id="yield" role="tabpanel" aria-labelledby="tab-yield" hidden><div class="feature"><h2>Yield/LP</h2><p>Yield dan liquidity pool berisiko impermanent loss serta risiko smart contract. Dashboard ini bersifat baca-saja.</p><div class="info-box"><h3>Status</h3><p id="strategyYield">Memeriksa endpoint strategi…</p></div></div></section>
+    <section id="perps" role="tabpanel" aria-labelledby="tab-perps" hidden><div class="feature"><h2>Perps</h2><p>Perpetual futures memiliki leverage dan risiko likuidasi. Tidak ada kontrol leverage di UI ini.</p><div class="info-box"><h3>Status</h3><p id="strategyPerps">Memeriksa endpoint strategi…</p></div></div></section>
+    <section id="history" role="tabpanel" aria-labelledby="tab-history" hidden><div class="feature"><h2>Riwayat aktivitas</h2><p>Swap Base dan error eksekusi terbaru dari event log.</p><div id="historyTable" class="empty">Memuat riwayat…</div></div></section>
   </main>
   <footer class="footer">crybot Base Network dashboard · polling 5 detik · perubahan konfigurasi dan arming dilakukan di server, bukan dari UI</footer>
 
 <script>
 'use strict';
-let demo = false;
-let optionalStrategyState = 'Memeriksa endpoint strategi…';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
 const num = value => Number(value);
-const fmt = (value, digits = 2) => Number.isFinite(num(value)) ? num(value).toLocaleString('id-ID', { minimumFractionDigits: digits, maximumFractionDigits: digits }) : '—';
-const fmtMs = value => value === null || value === undefined ? '—' : `${fmt(value, 0)} ms`;
-const pnlClass = value => num(value) > 0 ? 'pos' : num(value) < 0 ? 'neg' : 'muted';
-const pnlText = value => `${num(value) > 0 ? '+' : ''}${fmt(value)} USDT`;
 const token = () => localStorage.getItem('crybot_token') || '';
 function saveToken() { localStorage.setItem('crybot_token', $('tokenInput').value.trim()); location.reload(); }
 async function api(path, method = 'GET') {
@@ -165,8 +160,8 @@ async function optionalApi(path) {
 function setConnection(text, state) { const badge = $('wsBadge'); badge.className = `badge ${state}`; badge.innerHTML = `<i class="connection-dot"></i>${esc(text)}`; }
 function setSafetyBanner(status) {
   const banner = $('safetyBanner'); const mode = String(status.mode || '').toLowerCase();
-  if (mode === 'live') { banner.className = 'notice live'; banner.innerHTML = '<strong>Mode LIVE: transaksi dapat memakai dana sungguhan.</strong><p>Dashboard ini tidak bisa mengaktifkan live trading. Periksa <code>risk.armed</code>, halt, dan konfigurasi server sebelum melanjutkan.</p>'; banner.style.display = 'block'; return; }
-  if (status.halt) { banner.className = 'notice'; banner.innerHTML = '<strong>Halt pengaman aktif.</strong><p>Order baru diblokir. Gunakan “Clear halt” hanya setelah penyebabnya ditinjau; tombol ini tidak mengaktifkan <code>risk.armed</code>.</p>'; banner.style.display = 'block'; return; }
+  if (mode === 'live') { banner.className = 'notice live'; banner.innerHTML = '<strong>Mode LIVE: transaksi dapat memakai dana sungguhan.</strong><p>Dashboard ini tidak bisa mengaktifkan live trading. Periksa <code>risk.armed</code>, private key, dan konfigurasi server sebelum melanjutkan.</p>'; banner.style.display = 'block'; return; }
+  if (status.halt) { banner.className = 'notice'; banner.innerHTML = '<strong>Halt pengaman aktif.</strong><p>Order baru diblokir. Gunakan “Clear halt” hanya setelah penyebabnya ditinjau.</p>'; banner.style.display = 'block'; return; }
   banner.style.display = 'none';
 }
 function renderStatus(s) {
@@ -177,33 +172,41 @@ function renderStatus(s) {
   $('safetyState').textContent = halted ? 'HALT' : armed ? 'SIAP EKSEKUSI' : 'PAPER AMAN';
   $('safetyCard').className = `card ${halted || live ? 'critical-panel' : armed ? 'warning-panel' : 'safe-panel'}`;
   const uptime = num(s.uptime_sec); $('uptime').textContent = Number.isFinite(uptime) ? `uptime ${Math.floor(uptime / 3600)}j ${Math.floor((uptime % 3600) / 60)}m` : 'uptime —';
-  $('equity').textContent = `${fmt(s.equity_usdt)} USDT`; $('pnlToday').innerHTML = `<span class="${pnlClass(s.pnl_today_usdt)}">${esc(pnlText(s.pnl_today_usdt))}</span>`; $('pnlTotal').innerHTML = `<span class="${pnlClass(s.pnl_total_usdt)}">${esc(pnlText(s.pnl_total_usdt))}</span>`; $('pnlUnreal').innerHTML = `<span class="${pnlClass(s.unrealized_usdt)}">${esc(pnlText(s.unrealized_usdt))}</span>`;
-  $('winRate').textContent = s.closed_trades ? `${esc(s.wins)}/${esc(s.closed_trades)} (${fmt(s.win_rate_pct, 0)}%)` : 'Belum ada trade tertutup';
-  const metrics = s.metrics || {}; $('latDet').textContent = `${fmtMs(metrics.detect_p50)} / ${fmtMs(metrics.detect_p95)} / ${fmtMs(metrics.detect_p99)}`; $('latE2e').textContent = `${fmtMs(metrics.e2e_p50)} / ${fmtMs(metrics.e2e_p95)} / ${fmtMs(metrics.e2e_p99)}`;
-  const stale = (s.prices_age || []).some(price => num(price.age_ms) > 5000 || num(price.age_ms) < 0); $('priceAge').innerHTML = stale ? '<span class="neg">Perlu dicek</span>' : '<span class="pos">Harga segar</span>';
-  $('mFills').textContent = esc(metrics.master_fills ?? '—'); $('mSig').textContent = `${esc(metrics.signals ?? '—')} / ${esc(metrics.skips ?? '—')}`; $('mSkip').textContent = metrics.skip_rate_pct === undefined ? '—' : `${fmt(metrics.skip_rate_pct, 1)}%`; $('mOrd').textContent = `${esc(metrics.orders ?? '—')} → ${esc(metrics.follower_fills ?? '—')}`; $('mErr').innerHTML = num(metrics.exec_errors) ? `<span class="neg">${esc(metrics.exec_errors)}</span>` : '0';
-  const pairs = Array.isArray(s.pairs) ? s.pairs : []; $('pairCount').textContent = pairs.length; $('pairs').textContent = pairs.length ? pairs.join(', ') : 'Tidak ada pair yang dilaporkan.';
-  renderPositions(s.positions || []); $('copySummary').textContent = `${metrics.signals ?? 0} sinyal lolos, ${metrics.skips ?? 0} dilewati, ${metrics.follower_fills ?? 0} fill follower.`; setSafetyBanner(s);
-}
-function renderPositions(positions) {
-  if (!Array.isArray(positions) || !positions.length) { $('posTable').innerHTML = '<div class="empty">Tidak ada posisi terbuka yang dilaporkan.</div>'; return; }
-  $('posTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Pair</th><th>Jumlah</th><th>Harga rata-rata</th><th>Harga kini</th><th>Nilai</th><th>Untung/Rugi</th></tr></thead><tbody>${positions.map(p => `<tr><td><strong>${esc(p.symbol)}</strong></td><td>${esc(p.qty)}</td><td>${fmt(p.avg_cost)}</td><td>${fmt(p.mid)}</td><td>${fmt(p.value_usdt)} USDT</td><td class="${pnlClass(p.unrealized_usdt)}">${esc(pnlText(p.unrealized_usdt))}</td></tr>`).join('')}</tbody></table></div>`;
+  $('walletAddress').textContent = s.wallet_address ? `${s.wallet_address.slice(0, 8)}…${s.wallet_address.slice(-6)}` : '—';
+  $('walletAddress').title = s.wallet_address || '';
+  $('baseRpc').textContent = s.base_http_url || '—';
+  const metrics = s.metrics || {}; $('mOrders').textContent = esc(metrics.orders ?? '—'); $('mFills').textContent = esc(metrics.fills ?? '—'); $('mErrors').innerHTML = num(metrics.errors) ? `<span class="neg">${esc(metrics.errors)}</span>` : '0';
+  $('latE2e').textContent = `${esc(metrics.e2e_p50)} / ${esc(metrics.e2e_p95)} / ${esc(metrics.e2e_p99)}`;
+  const strategies = Array.isArray(s.strategies) ? s.strategies : []; const active = strategies.filter(x => x.enabled).map(x => x.name);
+  $('strategyCount').textContent = active.length; $('strategyList').textContent = active.length ? active.join(', ') : 'Tidak ada strategi aktif';
+  $('copySummary').textContent = `${metrics.orders ?? 0} order, ${metrics.fills ?? 0} fill, ${metrics.errors ?? 0} error.`;
+  setSafetyBanner(s);
 }
 function renderTrades(result) {
   const trades = result && Array.isArray(result.trades) ? result.trades : [];
-  if (!trades.length) { $('tradeTable').innerHTML = '<div class="empty">Belum ada aktivitas yang tercatat.</div>'; return; }
-  $('tradeTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Jenis</th><th>Pair / detail</th><th>Jumlah</th><th>Harga</th><th>Latensi</th></tr></thead><tbody>${trades.map(trade => { const data = trade.data && typeof trade.data === 'object' ? trade.data : {}; const time = new Date(trade.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); if (trade.kind !== 'follower_fill') return `<tr><td>${esc(time)}</td><td><span class="pill err">${esc(trade.kind)}</span></td><td colspan="4" class="muted">${esc(typeof trade.data === 'string' ? trade.data.slice(0, 140) : JSON.stringify(data).slice(0, 140))}</td></tr>`; const side = String(data.side || ''); return `<tr><td>${esc(time)}</td><td><span class="pill ${side === 'Buy' ? 'buy' : 'sell'}">${esc(side.toUpperCase())}${data.paper ? ' · PAPER' : ''}</span></td><td><strong>${esc(data.symbol)}</strong></td><td>${esc(data.qty)}</td><td>${fmt(data.price)}</td><td>${fmtMs(data.e2e_latency_ms)}</td></tr>`; }).join('')}</tbody></table></div>`;
+  const html = trades.length ? buildTradeTable(trades) : '<div class="empty">Belum ada aktivitas Base yang tercatat.</div>';
+  $('tradeTable').innerHTML = html; $('historyTable').innerHTML = html;
+}
+function buildTradeTable(trades) {
+  return `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Jenis</th><th>Pair / detail</th><th>Strategy</th><th>Tx hash</th></tr></thead><tbody>${trades.map(trade => {
+    const data = trade.data && typeof trade.data === 'object' ? trade.data : {};
+    const time = new Date(trade.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+    const kind = trade.kind === 'base_swap' ? '<span class="pill buy">SWAP</span>' : '<span class="pill err">ERROR</span>';
+    const pair = data.pair || data.symbol || '—';
+    const strategy = data.strategy || '—';
+    const tx = data.tx_hash || '—';
+    return `<tr><td>${esc(time)}</td><td>${kind}</td><td><strong>${esc(pair)}</strong> ${data.paper ? '· PAPER' : ''}</td><td>${esc(strategy)}</td><td class="muted">${esc(tx)}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
 }
 function renderOptionalStrategies(result) {
-  optionalStrategyState = result.available ? 'Endpoint strategi tersedia. Detail strategi akan ditampilkan ketika format data didukung.' : 'Belum tersedia dari server ini. Tidak ada konfigurasi atau transaksi yang bisa dilakukan dari dashboard.';
-  ['strategySniper', 'strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = optionalStrategyState; });
+  const text = result.available ? 'Endpoint strategi tersedia. Detail konfigurasi bisa dilihat di tab Overview.' : 'Belum tersedia dari server ini.';
+  ['strategySniper', 'strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = text; });
 }
 async function loadAll() {
-  if (demo) return;
   try {
-    const [status, trades] = await Promise.all([api('/api/status'), api('/api/trades')]); renderStatus(status); renderTrades(trades); setConnection('Polling aktif', 'ok');
-    const [strategies, positions] = await Promise.all([optionalApi('/api/strategies'), optionalApi('/api/positions')]); renderOptionalStrategies(strategies);
-    if (positions.available && Array.isArray(positions.data.positions)) renderPositions(positions.data.positions);
+    const [status, trades] = await Promise.all([api('/api/status'), api('/api/trades')]);
+    renderStatus(status); renderTrades(trades); setConnection('Polling aktif', 'ok');
+    const strategies = await optionalApi('/api/strategies'); renderOptionalStrategies(strategies);
   } catch (error) {
     if (error.message === 'unauthorized') return;
     setConnection('Server tidak terhubung', 'bad'); $('demoBanner').style.display = 'block';
@@ -213,8 +216,8 @@ function connectWebSocket() {
   if (!('WebSocket' in window)) { setConnection('Polling aktif', 'info'); return; }
   try { const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'; const ws = new WebSocket(`${protocol}//${location.host}/ws`); ws.onopen = () => setConnection('WebSocket terhubung', 'ok'); ws.onmessage = () => loadAll(); ws.onerror = () => setConnection('Polling aktif', 'info'); ws.onclose = () => setConnection('Polling aktif', 'info'); } catch (_) { setConnection('Polling aktif', 'info'); }
 }
-async function doStop() { if (demo) { alert('Server tidak terhubung; tidak ada bot yang dihentikan.'); return; } if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi secara manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
-async function doResume() { if (demo) { alert('Server tidak terhubung; tidak ada halt yang di-clear.'); return; } if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Tindakan ini tidak mengaktifkan risk.armed. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); loadAll(); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
+async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
+async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); loadAll(); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
 document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }));
 loadAll(); connectWebSocket(); setInterval(loadAll, 5000);
 </script>

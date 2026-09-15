@@ -107,19 +107,10 @@ impl std::fmt::Display for Snapshot {
         let fmt_ms = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("-".into());
         write!(
             f,
-            "METRIK | master fills={} signals={} skips={} (skip rate {:.1}%) orders={} fills={} errors={}\n\
-             latensi deteksi p50/p95/p99: {}/{}/{}\n\
-             latensi e2e p50/p95/p99: {}/{}/{}",
-            self.master_fills,
-            self.signals,
-            self.skips,
-            self.skip_rate_pct,
+            "METRIK BASE | orders={} fills={} errors={} | e2e p50/p95/p99: {}/{}/{}",
             self.orders,
             self.follower_fills,
             self.exec_errors,
-            fmt_ms(self.detect_p50),
-            fmt_ms(self.detect_p95),
-            fmt_ms(self.detect_p99),
             fmt_ms(self.e2e_p50),
             fmt_ms(self.e2e_p95),
             fmt_ms(self.e2e_p99),

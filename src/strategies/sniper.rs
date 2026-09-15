@@ -10,7 +10,7 @@ use alloy::primitives::Address;
 use rust_decimal::Decimal;
 
 use crate::config::SniperCfg;
-use crate::events::{MonitorMsg, Side, SignalEvent, StrategyEvent, StrategySource};
+use crate::events::{MonitorMsg, StrategyEvent, StrategySource};
 
 use super::common::StrategyContext;
 use super::{SharedState, Strategy};
@@ -149,22 +149,6 @@ impl Strategy for SniperStrategy {
         )
         .await;
 
-        ctx.tx_signal
-            .send(SignalEvent {
-                symbol: pair.clone(),
-                side: Side::Buy,
-                qty: Decimal::ZERO,
-                notional_usdt: Decimal::ZERO,
-                master_trade_id: 0,
-                master_price: Decimal::ZERO,
-                local_price: Decimal::ZERO,
-                deviation_pct: Decimal::ZERO,
-                detect_latency_ms: 0,
-                ts_ms: *ts_ms,
-                strategy: StrategySource::Sniper,
-            })
-            .await
-            .unwrap_or_else(|_| tracing::warn!("channel signal ditutup — kandidat sniper hilang"));
         ctx.alert(MonitorMsg::Warning(format!(
             "SNIPER PAPER: kandidat {pool} ({pair}) terdeteksi; reserve dan safety check RPC belum tervalidasi, order ditahan"
         )))
