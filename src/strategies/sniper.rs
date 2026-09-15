@@ -51,6 +51,7 @@ impl Strategy for SniperStrategy {
             pool,
             token0,
             token1,
+            factory,
             dex,
             ts_ms,
         } = event
@@ -86,7 +87,7 @@ impl Strategy for SniperStrategy {
             return;
         }
 
-        if !factory_allowed(dex, &self.cfg.dex_factories) {
+        if !factory_allowed(factory, &self.cfg.dex_factories) {
             ctx.log(
                 "sniper_skip_factory",
                 format!(r#"{{"pool":"{pool}","dex":"{dex}"}}"#),
@@ -175,9 +176,8 @@ fn factory_config_is_valid(_allowlist: &[Address]) -> bool {
     true
 }
 
-fn factory_allowed(dex: &str, allowlist: &[Address]) -> bool {
-    let Ok(dex_addr) = dex.parse::<Address>() else { return false; };
-    allowlist.is_empty() || allowlist.contains(&dex_addr)
+fn factory_allowed(factory: &Address, allowlist: &[Address]) -> bool {
+    allowlist.is_empty() || allowlist.contains(factory)
 }
 
 fn is_weth_pair(token0: &Address, token1: &Address) -> bool {
@@ -191,17 +191,20 @@ mod tests {
 
     #[test]
     fn factory_allowlist_is_case_insensitive() {
-        let factory = "0x1111111111111111111111111111111111111111";
+        let factory_str = "0x1111111111111111111111111111111111111111";
+        let factory_addr: Address = factory_str.parse().unwrap();
         assert!(factory_allowed(
-            "0x1111111111111111111111111111111111111111",
-            &[factory.parse().unwrap()]
+            &factory_addr,
+            &[factory_addr]
         ));
+        let other_addr: Address = "0x2222222222222222222222222222222222222222".parse().unwrap();
         assert!(!factory_allowed(
-            "0x2222222222222222222222222222222222222222",
-            &[factory.parse().unwrap()]
+            &other_addr,
+            &[factory_addr]
         ));
-        assert!(factory_allowed("0x3333333333333333333333333333333333333333", &[]));
-        assert!(factory_config_is_valid(&[factory.parse().unwrap()]));
+        let third_addr: Address = "0x3333333333333333333333333333333333333333".parse().unwrap();
+        assert!(factory_allowed(&third_addr, &[]));
+        assert!(factory_config_is_valid(&[factory_addr]));
     }
 
     #[test]

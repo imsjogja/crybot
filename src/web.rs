@@ -41,7 +41,7 @@ const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 pub struct WebState {
     pub mode: Mode,
     pub armed: bool,
-    pub wallet_address: String,
+    pub wallet_address: alloy::primitives::Address,
     pub base_http_url: String,
     pub strategies: StrategiesCfg,
     pub metrics: SharedMetrics,

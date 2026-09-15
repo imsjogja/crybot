@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
     // Base components
     let connector = BaseConnector::new(&cfg.base)?;
     let executor = BaseExecutor::new(&cfg.base, cfg.mode.is_paper())?;
-    let wallet_address = executor.signer_address().to_string();
+    let wallet_address = executor.signer_address();
     // Blueprint §8: simulasi eth_call pre-submit (paper dan live).
     let simulator = if cfg.simulation.pre_submit {
         Some(Simulator::new(

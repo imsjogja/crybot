@@ -260,7 +260,7 @@ impl BaseConnector {
                     if let Some(event) = Self::decode_factory_log(&log) {
                         {
                             let mut m = market.write().expect("market lock poisoned");
-                            if let StrategyEvent::NewPool { pool, token0, token1, dex, ts_ms } = &event {
+                            if let StrategyEvent::NewPool { pool, token0, token1, factory: _factory, dex, ts_ms } = &event {
                                 m.on_new_pool(*pool, *token0, *token1, dex, *ts_ms);
                             }
                         }
@@ -302,6 +302,7 @@ impl BaseConnector {
             pool,
             token0,
             token1,
+            factory: log.address(),
             dex: dex.into(),
             ts_ms: now_ms(),
         })
@@ -445,6 +446,7 @@ impl BaseConnector {
                 pool,
                 token0,
                 token1,
+                factory: _factory,
                 dex,
                 ts_ms,
             } = &event

@@ -71,6 +71,7 @@ pub enum StrategyEvent {
         pool: Address,
         token0: Address,
         token1: Address,
+        factory: Address,
         dex: String,
         ts_ms: i64,
     },
