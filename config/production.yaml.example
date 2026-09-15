@@ -1,8 +1,13 @@
 # Template deployment Docker yang mengaktifkan dashboard operator.
 # Salin menjadi config/production.yaml (file tersebut diabaikan Git).
 #
-# Dashboard dibuka hanya di network container; Compose mempublikasikannya pada
-# 127.0.0.1:8080 dan Caddy meneruskan TLS dari crybot.dna-server.cloud.
+# Bind dashboard WAJIB 0.0.0.0:8080 DI DALAM container agar terjangkau
+# docker-proxy; Compose hanya mempublikasikannya ke 127.0.0.1:8080 host dan
+# Caddy meneruskan TLS dari crybot.dna-server.cloud — tidak pernah terbuka
+# langsung ke internet.
+#
+# Keamanan API: isi DASHBOARD_TOKEN di .env. Bila terisi, semua /api/*
+# wajib header `Authorization: Bearer <token>`.
 mode: paper
 
 master:
@@ -39,15 +44,78 @@ monitor:
   telegram_chat_id_env: TELEGRAM_CHAT_ID
   alert_on_fill: true
   commands_enabled: true
-  dashboard_enabled: true
-  dashboard_bind: "0.0.0.0:8080"
-  dashboard_username_env: DASHBOARD_USERNAME
-  dashboard_password_env: DASHBOARD_PASSWORD
-  dashboard_allowed_origin: "https://crybot.dna-server.cloud"
 
 store:
   sqlite_path: data/events.db
 
+# Dashboard web (UI + REST API + WebSocket) — schema baru kunci `web`.
+# Kunci lama monitor.dashboard_* sudah tidak dipakai lagi.
+web:
+  enabled: true
+  bind: "0.0.0.0:8080"
+
 reconcile:
   interval_min: 60
   tolerance_pct: "1"
+
+# ============================================================================
+# BASE NETWORK — read-only saat paper (provider HTTP, tanpa signer riil).
+# Untuk mode live, isi BASE_PRIVATE_KEY di .env (nama env-nya: private_key_env).
+# ============================================================================
+base:
+  ws_url: "wss://base-flashblocks.coinbase.com/v1/ws/base"
+  http_url: "https://mainnet.base.org"
+  flashblocks: true
+  mev_rpc_url: null
+  private_key_env: BASE_PRIVATE_KEY
+
+# ============================================================================
+# STRATEGI BASE NETWORK — semua default enabled: false (aman). Aktifkan
+# bertahap HANYA setelah validasi paper.
+# ============================================================================
+strategies:
+  sniper:
+    enabled: false
+    max_buy_eth: "0.05"
+    min_liquidity_eth: "1.0"
+    auto_tp_pct: "50"
+    auto_sl_pct: "20"
+    safety:
+      check_honeypot: true
+      check_ownership_renounced: true
+      check_lp_locked: false
+      check_holder_distribution: true
+      max_holder_pct: "5"
+
+  copy_onchain:
+    enabled: false
+    slippage_bps: 300
+    sizing: fixed_ratio
+    copy_ratio: "0.1"
+    min_tx_eth: "0.01"
+    max_tx_eth: "1.0"
+    target_wallets: []
+
+  grid_dca:
+    enabled: false
+    grids: []
+    dca_plans: []
+
+  arbitrage:
+    enabled: false
+    min_profit_eth: "0.001"
+    max_gas_gwei: 5
+    monitored_pools: []
+
+  yield_farming:
+    enabled: false
+    auto_compound_interval_hours: 6
+    min_fee_threshold_eth: "0.001"
+    positions: []
+
+  perps:
+    enabled: false
+    max_leverage: 10
+    exchange_router: null
+    reader: null
+    positions: []

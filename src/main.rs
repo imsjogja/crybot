@@ -34,6 +34,13 @@ use crypto_copy_bot::web::{self, WebState};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Tree dependency mengaktifkan feature crypto rustls ganda sekaligus
+    // ('ring' via reqwest/sqlx/tokio-tungstenite, 'aws-lc-rs' via stack alloy),
+    // sehingga rustls tidak dapat memilih CryptoProvider level-proses secara
+    // otomatis dan akan panic (abort di release) saat koneksi TLS pertama.
+    // Set provider eksplisit sebelum komponen lain menyentuh jaringan.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
