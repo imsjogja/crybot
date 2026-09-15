@@ -18,7 +18,6 @@ RUN mkdir src \
 # 2) Build source asli (assets/dashboard.html di-embed via include_str!)
 COPY src ./src
 COPY assets ./assets
-COPY tests ./tests
 # COPY preserves host mtimes.  The placeholder crate above is created during
 # the image build and can therefore appear newer than the real checked-out
 # roots; force Cargo to rebuild the application rather than packaging the
