@@ -29,7 +29,10 @@ use anyhow::{Context, Result};
 use tokio::sync::mpsc;
 
 use crate::config::BaseCfg;
+use crate::domain::{ExecutionReport, ExecutionStatus, RiskDecision, TradeIntent};
 use crate::events::{now_ms, LogEntry, MonitorMsg, Side, StrategySource};
+use crate::risk::SharedRiskEngine;
+use crate::simulation::Simulator;
 
 // ============================================================================
 // BASE ORDER
@@ -157,9 +160,17 @@ impl BaseExecutor {
     /// Alamat wallet signer (derived dari private key).
     ///
     /// Address ini menerima ETH dari faucet (testnet) atau sudah ter-funded (mainnet).
-    #[allow(dead_code)]
     pub fn signer_address(&self) -> Address {
         self.signer.address()
+    }
+
+    /// Provider read-only internal (untuk membangun Simulator).
+    pub fn read_provider(&self) -> &RootProvider {
+        &self.provider
+    }
+
+    pub fn is_paper(&self) -> bool {
+        self.paper_mode
     }
 
     /// Ambil saldo ETH signer (dalam wei).
@@ -341,38 +352,130 @@ impl BaseExecutor {
 // RUNNER TASK
 // ============================================================================
 
-/// Task: konsumsi `BaseOrder` dari channel → eksekusi swap → log + alert + metrics.
+/// Task: konsumsi `BaseOrder` → **risk gate → simulation → submit** (§7/§8).
 ///
-/// Pattern sama dengan `run_execution` di `engine.rs`, tapi untuk Base Network.
+/// Blueprint §8: "Tidak ada auto-buy langsung dari strategy signal. Semua
+/// transaksi melalui validation dan simulation."
 ///
 /// # Alur per order
-/// 1. Increment counter `orders` di metrics.
-/// 2. Eksekusi swap:
-///    - Paper mode → `execute_swap_paper` (fake hash, no broadcast)
-///    - Live mode → `execute_swap` (tx broadcast via RPC/MEV RPC)
-/// 3. On success: increment `follower_fills`, record e2e latency,
-///    log ke `tx_log`, kirim alert ke `tx_monitor`.
-/// 4. On error: increment `exec_errors`, log error, kirim critical alert.
-///
-/// # Lifetime
-/// Task berjalan sampai channel `rx` ditutup (sender di-drop).
+/// 1. **Risk gate** (`RiskEngine::evaluate`): armed, halt, allowlist, max
+///    value, quote TTL, daily loss, circuit breaker — deterministik. REJECT =
+///    order dibatalkan, dicatat (`risk_decided`), dialert.
+/// 2. **Simulation** (bila `simulator` ada): eth_call pre-submit. Revert =
+///    tx dibatalkan sebelum signing (tidak buang gas).
+/// 3. **Submit**: paper → simulasi lokal; live → broadcast via RPC/MEV RPC,
+///    lalu tunggu receipt — revert on-chain dihitung terpisah (§13).
+/// 4. Outcome dicatat ke risk engine (circuit breaker) + metrics + log.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_base_execution(
     mut rx: mpsc::Receiver<BaseOrder>,
     executor: BaseExecutor,
+    risk: SharedRiskEngine,
+    simulator: Option<Simulator>,
+    quote_ttl_ms: i64,
     tx_log: mpsc::Sender<LogEntry>,
     tx_monitor: mpsc::Sender<MonitorMsg>,
     metrics: crate::metrics::SharedMetrics,
 ) {
     tracing::info!(
         paper = executor.paper_mode,
-        "run_base_execution started — menunggu BaseOrder"
+        simulation = simulator.is_some(),
+        quote_ttl_ms,
+        "run_base_execution started — pipeline risk→sim→submit aktif (§7/§8)"
     );
 
     while let Some(order) = rx.recv().await {
         metrics.inc(&metrics.orders);
         let start_ts = now_ms();
 
-        // Pilih method berdasarkan mode.
+        // ── GATE 1: Risk engine (§7 deterministic blocking) ──
+        let intent = TradeIntent {
+            strategy: order.strategy,
+            pair: order.pair.clone(),
+            side: order.side,
+            router: order.router,
+            value: order.value,
+            score: 0,
+            quote_ts_ms: order.ts_ms,
+        };
+        let decision = risk.evaluate(&intent, quote_ttl_ms);
+        if let RiskDecision::Reject { reasons } = &decision {
+            let stale = reasons.iter().any(|r| r.contains("stale"));
+            metrics.inc(if stale {
+                &metrics.stale_rejected
+            } else {
+                &metrics.risk_rejected
+            });
+            tracing::warn!(
+                strategy = %order.strategy,
+                pair = %order.pair,
+                ?reasons,
+                "order DITOLAK risk engine (§7)"
+            );
+            let _ = tx_log
+                .send(LogEntry {
+                    kind: "risk_decided".into(),
+                    payload: serde_json::json!({
+                        "decision": "reject",
+                        "strategy": order.strategy.to_string(),
+                        "pair": order.pair,
+                        "side": format!("{:?}", order.side),
+                        "reasons": reasons,
+                    })
+                    .to_string(),
+                    ts_ms: now_ms(),
+                })
+                .await;
+            let _ = tx_monitor
+                .send(MonitorMsg::Warning(format!(
+                    "⛔ Order {} {} ditolak risk engine: {}",
+                    order.strategy,
+                    order.pair,
+                    reasons.join("; ")
+                )))
+                .await;
+            continue;
+        }
+
+        // ── GATE 2: Simulation pre-submit (§8) ──
+        if let Some(sim) = &simulator {
+            let sim_result = sim
+                .simulate_tx(order.router, order.calldata.clone(), order.value)
+                .await;
+            metrics.record_sim_latency(sim_result.latency_ms);
+            if !sim_result.ok {
+                metrics.inc(&metrics.sim_failed);
+                let err = sim_result.error.clone().unwrap_or_default();
+                tracing::warn!(
+                    strategy = %order.strategy,
+                    pair = %order.pair,
+                    error = %err,
+                    "simulasi eth_call gagal — tx dibatalkan sebelum submit (§8)"
+                );
+                let _ = tx_log
+                    .send(LogEntry {
+                        kind: "simulation_failed".into(),
+                        payload: serde_json::json!({
+                            "strategy": order.strategy.to_string(),
+                            "pair": order.pair,
+                            "error": err,
+                        })
+                        .to_string(),
+                        ts_ms: now_ms(),
+                    })
+                    .await;
+                let _ = tx_monitor
+                    .send(MonitorMsg::Warning(format!(
+                        "🧪 Simulasi gagal [{} {}] — tx batal: {err}",
+                        order.strategy, order.pair
+                    )))
+                    .await;
+                continue;
+            }
+        }
+
+        // ── SUBMIT (§8: Build -> Sign -> Submit -> Confirm) ──
+        let submit_start = now_ms();
         let result = if executor.paper_mode {
             executor
                 .execute_swap_paper(order.router, order.calldata.clone(), order.value)
@@ -382,35 +485,61 @@ pub async fn run_base_execution(
                 .execute_swap(order.router, order.calldata.clone(), order.value)
                 .await
         };
+        let submit_ack_ms = now_ms() - submit_start;
+        metrics.record_submit_ack_latency(submit_ack_ms);
 
         match result {
             Ok(tx_hash) => {
+                // Confirm: mode live menunggu receipt; revert dihitung (§13).
+                let mut status = if executor.paper_mode {
+                    ExecutionStatus::Simulated
+                } else {
+                    ExecutionStatus::Unconfirmed
+                };
+                if !executor.paper_mode && tx_hash != B256::ZERO {
+                    match executor.wait_for_receipt(tx_hash, 30).await {
+                        Ok(true) => status = ExecutionStatus::Confirmed,
+                        Ok(false) => {
+                            status = ExecutionStatus::Reverted;
+                            metrics.inc(&metrics.reverted_tx);
+                        }
+                        Err(e) => {
+                            tracing::warn!(error = %e, %tx_hash, "gagal konfirmasi receipt");
+                        }
+                    }
+                }
+
+                let success = !matches!(status, ExecutionStatus::Reverted);
+                risk.record_outcome(success);
                 metrics.inc(&metrics.follower_fills);
                 let e2e_ms = now_ms() - start_ts;
                 metrics.record_e2e_latency(e2e_ms);
 
-                tracing::info!(
-                    strategy = %order.strategy,
-                    pair = %order.pair,
-                    side = ?order.side,
-                    %tx_hash,
-                    paper = executor.paper_mode,
+                let report = ExecutionReport {
+                    strategy: order.strategy.to_string(),
+                    pair: order.pair.clone(),
+                    side: order.side,
+                    status,
+                    tx_hash: Some(tx_hash),
+                    submit_ack_ms,
                     e2e_ms,
-                    "swap base dieksekusi"
-                );
+                    ts_ms: now_ms(),
+                };
+                tracing::info!(?status, %tx_hash, e2e_ms, submit_ack_ms, "swap base dieksekusi");
 
-                // Log append-only untuk persistence.
                 let _ = tx_log
                     .send(LogEntry {
                         kind: "base_swap".into(),
                         payload: serde_json::json!({
-                            "strategy": order.strategy.to_string(),
-                            "pair": order.pair,
-                            "side": format!("{:?}", order.side),
+                            "strategy": report.strategy,
+                            "pair": report.pair,
+                            "side": format!("{:?}", report.side),
+                            "status": format!("{:?}", report.status),
                             "tx_hash": format!("{tx_hash}"),
                             "router": format!("{}", order.router),
                             "value": format!("{}", order.value),
                             "paper": executor.paper_mode,
+                            "submit_ack_ms": submit_ack_ms,
                             "e2e_ms": e2e_ms,
                         })
                         .to_string(),
@@ -418,16 +547,22 @@ pub async fn run_base_execution(
                     })
                     .await;
 
-                // Alert ke monitoring (Telegram, dll.).
                 let tag = if executor.paper_mode { "PAPER" } else { "LIVE" };
-                let _ = tx_monitor
-                    .send(MonitorMsg::Fill(format!(
-                        "[{tag}] {:?} {} {} tx={tx_hash} (e2e {e2e_ms} ms)",
+                let level = if matches!(status, ExecutionStatus::Reverted) {
+                    MonitorMsg::Critical(format!(
+                        "[{tag}] REVERTED {:?} {} {} tx={tx_hash}",
                         order.side, order.pair, order.strategy
-                    )))
-                    .await;
+                    ))
+                } else {
+                    MonitorMsg::Fill(format!(
+                        "[{tag}] {:?} {:?} {} {} tx={tx_hash} (e2e {e2e_ms} ms)",
+                        status, order.side, order.pair, order.strategy
+                    ))
+                };
+                let _ = tx_monitor.send(level).await;
             }
             Err(e) => {
+                risk.record_outcome(false);
                 metrics.inc(&metrics.exec_errors);
                 tracing::error!(
                     error = %e,

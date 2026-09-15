@@ -16,10 +16,12 @@ pub mod sniper;
 pub mod perps;
 pub mod r#yield;
 
+use alloy::primitives::U256;
 use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, StrategiesCfg};
 use crate::events::{LogEntry, MonitorMsg, StrategyEvent};
+use crate::market::SharedMarketState;
 
 /// State global yang di-share ke semua strategi via trait `Strategy`.
 #[allow(dead_code)]
@@ -28,6 +30,9 @@ pub struct SharedState {
     pub config: StrategiesCfg,
     /// Alamat kontrak penting Base Network (router, factory, dll).
     pub base_addresses: crate::config::BaseAddresses,
+    /// Market state in-memory (blueprint §4) — strategi membaca state lokal,
+    /// BUKAN RPC berulang (§3).
+    pub market: SharedMarketState,
     /// SQLite connection pool untuk persistence (log, posisi, dll).
     pub pool: sqlx::SqlitePool,
     /// Channel untuk mengirim log entries ke store (append-only).
@@ -126,6 +131,23 @@ impl StrategyEngine {
         }
 
         while let Some(event) = self.rx_event.recv().await {
+            // Normalisasi event -> MarketState SEBELUM strategi membaca
+            // (blueprint §4: "event normalization before market engine").
+            // NewBlock/NewPool sudah ditangani connector; di sini kita tangani
+            // PoolSync dan PriceTick yang datang dari sumber lain.
+            if let StrategyEvent::PoolSync {
+                pool,
+                reserve0,
+                reserve1,
+                ts_ms,
+            } = &event
+            {
+                let r0 = reserve0.parse::<U256>().unwrap_or(U256::ZERO);
+                let r1 = reserve1.parse::<U256>().unwrap_or(U256::ZERO);
+                let mut m = self.shared.market.write().expect("market lock poisoned");
+                m.on_pool_sync(pool, r0, r1, *ts_ms);
+            }
+
             for s in &mut self.strategies {
                 if s.enabled() {
                     s.on_event(&event, &self.shared).await;

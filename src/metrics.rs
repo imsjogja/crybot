@@ -15,12 +15,28 @@ const WINDOW_CAP: usize = 2048;
 pub struct Metrics {
     detect_latency: Mutex<VecDeque<i64>>,
     e2e_latency: Mutex<VecDeque<i64>>,
+    /// Latensi RPC read (block number, balance, receipt) — blueprint §13.
+    rpc_latency: Mutex<VecDeque<i64>>,
+    /// Latensi simulasi eth_call pre-submit (§8/§13).
+    sim_latency: Mutex<VecDeque<i64>>,
+    /// Latensi submit->ack (send_transaction -> tx hash) (§13).
+    submit_ack_latency: Mutex<VecDeque<i64>>,
     pub master_fills: AtomicU64,
     pub signals: AtomicU64,
     pub skips: AtomicU64,
     pub orders: AtomicU64,
     pub follower_fills: AtomicU64,
     pub exec_errors: AtomicU64,
+    /// Order ditolak risk engine (§7 deterministic blocking).
+    pub risk_rejected: AtomicU64,
+    /// Order ditolak karena quote/state stale (§3.5).
+    pub stale_rejected: AtomicU64,
+    /// Simulasi eth_call gagal — tx dibatalkan sebelum submit (§8).
+    pub sim_failed: AtomicU64,
+    /// Tx terkirim tetapi revert on-chain (§13).
+    pub reverted_tx: AtomicU64,
+    /// Gap/reorg block feed terdeteksi (§15 checklist).
+    pub feed_gaps: AtomicU64,
 }
 
 pub type SharedMetrics = Arc<Metrics>;
@@ -55,6 +71,12 @@ pub struct Snapshot {
     pub e2e_p50: Option<i64>,
     pub e2e_p95: Option<i64>,
     pub e2e_p99: Option<i64>,
+    pub rpc_p50: Option<i64>,
+    pub rpc_p95: Option<i64>,
+    pub sim_p50: Option<i64>,
+    pub sim_p95: Option<i64>,
+    pub submit_p50: Option<i64>,
+    pub submit_p95: Option<i64>,
     pub master_fills: u64,
     pub signals: u64,
     pub skips: u64,
@@ -62,6 +84,11 @@ pub struct Snapshot {
     pub orders: u64,
     pub follower_fills: u64,
     pub exec_errors: u64,
+    pub risk_rejected: u64,
+    pub stale_rejected: u64,
+    pub sim_failed: u64,
+    pub reverted_tx: u64,
+    pub feed_gaps: u64,
 }
 
 impl Metrics {
@@ -71,6 +98,15 @@ impl Metrics {
     }
     pub fn record_e2e_latency(&self, ms: i64) {
         push(&self.e2e_latency, ms);
+    }
+    pub fn record_rpc_latency(&self, ms: i64) {
+        push(&self.rpc_latency, ms);
+    }
+    pub fn record_sim_latency(&self, ms: i64) {
+        push(&self.sim_latency, ms);
+    }
+    pub fn record_submit_ack_latency(&self, ms: i64) {
+        push(&self.submit_ack_latency, ms);
     }
     pub fn inc(&self, c: &AtomicU64) {
         c.fetch_add(1, Ordering::Relaxed);
@@ -87,6 +123,12 @@ impl Metrics {
             e2e_p50: percentile(&self.e2e_latency, 0.50),
             e2e_p95: percentile(&self.e2e_latency, 0.95),
             e2e_p99: percentile(&self.e2e_latency, 0.99),
+            rpc_p50: percentile(&self.rpc_latency, 0.50),
+            rpc_p95: percentile(&self.rpc_latency, 0.95),
+            sim_p50: percentile(&self.sim_latency, 0.50),
+            sim_p95: percentile(&self.sim_latency, 0.95),
+            submit_p50: percentile(&self.submit_ack_latency, 0.50),
+            submit_p95: percentile(&self.submit_ack_latency, 0.95),
             master_fills: self.master_fills.load(Ordering::Relaxed),
             signals,
             skips,
@@ -98,6 +140,11 @@ impl Metrics {
             orders: self.orders.load(Ordering::Relaxed),
             follower_fills: self.follower_fills.load(Ordering::Relaxed),
             exec_errors: self.exec_errors.load(Ordering::Relaxed),
+            risk_rejected: self.risk_rejected.load(Ordering::Relaxed),
+            stale_rejected: self.stale_rejected.load(Ordering::Relaxed),
+            sim_failed: self.sim_failed.load(Ordering::Relaxed),
+            reverted_tx: self.reverted_tx.load(Ordering::Relaxed),
+            feed_gaps: self.feed_gaps.load(Ordering::Relaxed),
         }
     }
 }
@@ -107,13 +154,21 @@ impl std::fmt::Display for Snapshot {
         let fmt_ms = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("-".into());
         write!(
             f,
-            "METRIK BASE | orders={} fills={} errors={} | e2e p50/p95/p99: {}/{}/{}",
+            "METRIK BASE | orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} submit p95: {}",
             self.orders,
             self.follower_fills,
             self.exec_errors,
+            self.risk_rejected,
+            self.stale_rejected,
+            self.sim_failed,
+            self.reverted_tx,
+            self.feed_gaps,
             fmt_ms(self.e2e_p50),
             fmt_ms(self.e2e_p95),
             fmt_ms(self.e2e_p99),
+            fmt_ms(self.rpc_p95),
+            fmt_ms(self.sim_p95),
+            fmt_ms(self.submit_p95),
         )
     }
 }
