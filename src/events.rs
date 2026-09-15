@@ -130,6 +130,10 @@ pub enum WsBroadcast {
         score: i64,
         reasons: String,
     },
+    MarketScannerUpdate { 
+        data: serde_json::Value, 
+    }, 
+
     NewTrade {
         ts_ms: i64,
         kind: String,
