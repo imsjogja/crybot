@@ -218,7 +218,7 @@ function renderSignals(result) {
     const sidePill = side === 'buy' || side === 'sell' ? `<span class="pill ${side}">${esc(side.toUpperCase())}</span>` : esc(signal.side || '—');
     const score = num(signal.score);
     const reasons = Array.isArray(signal.reasons) ? signal.reasons.join(' · ') : String(signal.reasons || '—');
-    return `<tr><td>${esc(time)}</td><td><strong title="${esc(pair)}">${esc(pairShort)}</strong></td><td>${sidePill}</td><td>${score > 0 ? esc(score) : '—'}</td><td>${esc(signal.strategy || '—')}</td><td class="muted">${esc(reasons)}</td></tr>`;
+    return `<tr><td>${esc(time)}</td><td><a href="javascript:void(0)" onclick="showChart('${esc(pair)}')" style="color:var(--blue);text-decoration:none;"><strong title="${esc(pair)}">${esc(pairShort)}</strong></a></td><td>${sidePill}</td><td>${score > 0 ? esc(score) : '—'}</td><td>${esc(signal.strategy || '—')}</td><td class="muted">${esc(reasons)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 function renderOptionalStrategies(result) {
@@ -298,6 +298,23 @@ async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan da
 async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
 async function doHalt() { if (!confirm('Emergency halt: hentikan SEMUA order buy baru sekarang? Monitoring tetap berjalan.')) return; try { await api('/api/halt', 'POST'); } catch (error) { alert(`Gagal halt: ${error.message}`); } }
 document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }));
+
+function showChart(pairStr) {
+  if (!pairStr || pairStr === '—') return;
+  const tokens = pairStr.split('/');
+  const target = tokens[0];
+  if (!target.startsWith('0x')) return;
+  
+  const chartCard = $('chartCard');
+  const chartTitle = $('chartTitle');
+  const chartContainer = $('chartContainer');
+  
+  chartCard.style.display = 'block';
+  chartTitle.textContent = pairStr;
+  chartContainer.innerHTML = `<iframe src="https://dexscreener.com/base/${target}?embed=1&theme=dark&info=0" width="100%" height="100%" frameborder="0"></iframe>`;
+  chartCard.scrollIntoView({ behavior: 'smooth' });
+}
+
 connectWebSocket();
 </script>
 </body>

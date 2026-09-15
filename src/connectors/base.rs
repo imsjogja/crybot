@@ -312,6 +312,7 @@ impl BaseConnector {
         let a = &self.config.addresses;
         [
             a.aerodrome_pool_factory.as_str(),
+            a.uniswap_v2_factory.as_str(),
             a.uniswap_v3_factory.as_str(),
             a.baseswap_factory.as_str(),
         ]

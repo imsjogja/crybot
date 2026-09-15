@@ -63,7 +63,7 @@ base:
 # Strategi Base Network — semua default disabled (aman)
 strategies:
   sniper:
-    enabled: false
+    enabled: true
     max_buy_eth: "0.05"
     min_liquidity_eth: "1.0"
     auto_tp_pct: "50"
