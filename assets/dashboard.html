@@ -130,8 +130,7 @@
         <article class="card"><h2>Feed Base</h2><p>Header dan log factory yang diterima connector.</p><div class="rows"><div class="row"><span>New heads</span><span id="mNewHeads">—</span></div><div class="row"><span>Factory logs raw</span><span id="mFactoryLogs">—</span></div><div class="row"><span>Pool terdecode</span><span id="mPoolsDetected">—</span></div><div class="row"><span>Factory topic tidak dikenal</span><span id="mFactoryUnknownLogs">—</span></div></div></article>
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2 id="activeStrategyTitle">Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
-        <article class="card wide"><h2>Paper performance <span class="pill err">MODEL</span></h2><p>Simulasi posisi; bukan saldo, fill, atau keuntungan live.</p><div class="metric" id="paperPnl">—</div><div class="rows"><div class="row"><span>Realized PnL (closed)</span><span id="paperRealizedPnl">—</span></div><div class="row"><span>Unrealized PnL (open)</span><span id="paperUnrealizedPnl">—</span></div><div class="row"><span>Posisi open / closed</span><span id="paperCounts">—</span></div><div class="row"><span>Menang / kalah (closed)</span><span id="paperWinLoss">—</span></div><div class="row"><span>Total model gas/cost</span><span id="paperCosts">—</span></div></div></article>
-        <article class="card full"><h2>Posisi paper terbaru <span class="pill err">MODEL</span></h2><p>Lifecycle dan PnL simulasi dari event paper; tidak menggambarkan eksekusi on-chain.</p><div id="paperPositionTable" class="empty">Memuat posisi paper…</div></article>
+        <article class="card wide"><h2>Ringkasan paper global <span class="pill err">MODEL</span></h2><p>Simulasi lintas strategi; bukan saldo, fill, atau keuntungan live.</p><div class="metric" id="overviewPaperPnl">—</div><div class="rows"><div class="row"><span>Posisi open / closed</span><span id="overviewPaperCounts">—</span></div></div><div style="margin-top:12px"><button class="btn primary" id="goToSniperBtn" type="button">Lihat model Token Sniper</button></div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
         <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
         <article class="card full"><h2>Log keputusan strategi</h2><p>Keputusan kandidat dan skip yang telah tersimpan. Tidak mencatat setiap block.</p><div id="decisionTable" class="empty">Memuat keputusan…</div></article>
@@ -154,7 +153,23 @@
       </div>
     </section>
 
-    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden><div class="feature"><h2>Token Sniper</h2><p>Monitoring pool/token baru di Base. crybot saat ini belum menyediakan kontrol sniper melalui dashboard.</p><div class="feature-grid"><div class="info-box"><h3>Status simulator</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div><div class="info-box"><h3>Lifecycle paper</h3><p>Simulator membuka posisi virtual dari quote reserve, memperbarui valuasi saat posisi tetap open, lalu menutupnya hanya ketika ambang take-profit atau stop-loss virtual tercapai. Tidak ada transaksi on-chain.</p></div><div class="info-box"><h3>Model biaya</h3><p>Estimasi gas entry+exit dicatat sekali untuk setiap posisi paper. Realized PnL hanya berasal dari posisi closed; valuasi posisi open tetap unrealized.</p></div><div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div></div></div></section>
+    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden>
+      <div class="feature">
+        <h2>Token Sniper <span class="pill err">READ-ONLY MODEL</span></h2>
+        <p>Monitoring pool/token baru di Base. Konfigurasi dan simulasi ditampilkan baca-saja; dashboard tidak dapat mengaktifkan atau mengirim perdagangan.</p>
+        <div class="feature-grid">
+          <div class="info-box"><h3>Konfigurasi aktual</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div>
+          <div class="info-box"><h3>Lifecycle paper</h3><p>Simulator membuka posisi virtual dari quote reserve, memperbarui valuasi saat posisi tetap open, lalu menutupnya hanya ketika ambang take-profit atau stop-loss virtual tercapai. Tidak ada transaksi on-chain.</p></div>
+          <div class="info-box"><h3>Model biaya</h3><p>Estimasi gas entry+exit dicatat sekali untuk setiap posisi paper. Realized PnL hanya berasal dari posisi closed; valuasi posisi open tetap unrealized.</p></div>
+          <div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div>
+        </div>
+      </div>
+      <div class="grid" style="margin-top:14px">
+        <article class="card wide"><h2>Performa model sniper <span class="pill err">MODEL</span></h2><p>Simulasi posisi sniper; bukan saldo, fill, atau keuntungan live.</p><div class="metric" id="sniperPaperPnl">—</div><div class="rows"><div class="row"><span>Realized PnL (closed)</span><span id="sniperPaperRealizedPnl">—</span></div><div class="row"><span>Unrealized PnL (open)</span><span id="sniperPaperUnrealizedPnl">—</span></div><div class="row"><span>Posisi open / closed</span><span id="sniperPaperCounts">—</span></div><div class="row"><span>Menang / kalah (closed)</span><span id="sniperPaperWinLoss">—</span></div><div class="row"><span>Total model gas/cost</span><span id="sniperPaperCosts">—</span></div></div></article>
+        <article class="card full"><h2>Posisi paper sniper <span class="pill err">MODEL</span></h2><p>Lifecycle dan PnL simulasi dari event paper; tidak menggambarkan eksekusi on-chain.</p><div id="sniperPaperPositionTable" class="empty">Memuat posisi paper…</div></article>
+        <article class="card full"><h2>Keputusan sniper terbaru <span class="pill err">MODEL</span></h2><p>Hanya keputusan strategi sniper yang tersimpan; bukan rekomendasi atau perintah perdagangan.</p><div id="sniperDecisionTable" class="empty">Memuat keputusan sniper…</div></article>
+      </div>
+    </section>
     <section id="copy" role="tabpanel" aria-labelledby="tab-copy" hidden><div class="feature"><h2>Copy Wallet</h2><p>Bot dapat melaporkan aktivitas wallet target on-chain. Pengaturan wallet tetap dilakukan melalui konfigurasi server.</p><div class="feature-grid"><div class="info-box"><h3>Status</h3><p id="copySummary">Memuat data status…</p></div><div class="info-box"><h3>Untuk pemula</h3><p>Copy trading on-chain tidak menjamin hasil sama. Slippage, gas, dan kecepatan block dapat berbeda.</p></div></div></div></section>
     <section id="grid" role="tabpanel" aria-labelledby="tab-grid" hidden><div class="feature"><h2>Grid &amp; DCA</h2><p>Grid membagi order di rentang harga; DCA membeli berkala. Keduanya belum dapat diatur dari dashboard ini.</p><div class="info-box"><h3>Keamanan</h3><p>Jangan menganggap strategi otomatis bebas risiko. Tentukan anggaran maksimum sebelum mengaktifkan dari konfigurasi bot.</p></div></div></section>
     <section id="arbitrage" role="tabpanel" aria-labelledby="tab-arbitrage" hidden><div class="feature"><h2>Arbitrage</h2><p>Arbitrage mencari perbedaan harga antar DEX di Base, tetapi biaya, slippage, dan gas dapat menghapus peluang.</p><div class="info-box"><h3>Status</h3><p id="strategyArbitrage">Memeriksa endpoint strategi…</p></div></div></section>
@@ -232,24 +247,42 @@ function renderStatus(s) {
   setSafetyBanner(s);
 }
 function formatModelNumber(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed.toLocaleString('en-US', { maximumFractionDigits: 6 }) : '—'; }
-function renderModelPnl(id, value) { const parsed = Number(value); const node = $(id); node.textContent = Number.isFinite(parsed) ? `${parsed >= 0 ? '+' : ''}${formatModelNumber(parsed)}` : '—'; node.className = Number.isFinite(parsed) ? (parsed < 0 ? 'neg' : 'pos') : ''; }
+function formatModelPnl(value) { const parsed = Number(value); return Number.isFinite(parsed) ? `${parsed >= 0 ? '+' : ''}${formatModelNumber(parsed)}` : '—'; }
+function renderModelPnl(id, value) { const parsed = Number(value); const node = $(id); node.textContent = formatModelPnl(value); node.className = Number.isFinite(parsed) ? (parsed < 0 ? 'neg' : 'pos') : ''; }
+function aggregatePaperPositions(positions) {
+  return positions.reduce((aggregate, position) => {
+    const pnl = Number(position.pnl); const costs = Number(position.costs); const closed = String(position.status || '').toLowerCase() === 'closed';
+    if (closed) { aggregate.closed_positions += 1; } else { aggregate.open_positions += 1; }
+    if (Number.isFinite(pnl)) { aggregate.total_pnl += pnl; if (closed) { aggregate.realized_pnl += pnl; if (pnl > 0) { aggregate.winning_positions += 1; } if (pnl < 0) { aggregate.losing_positions += 1; } } else { aggregate.unrealized_pnl += pnl; } }
+    if (Number.isFinite(costs)) { aggregate.total_costs += costs; }
+    return aggregate;
+  }, { open_positions: 0, closed_positions: 0, winning_positions: 0, losing_positions: 0, realized_pnl: 0, unrealized_pnl: 0, total_pnl: 0, total_costs: 0 });
+}
+function renderPaperPositionTable(id, positions) {
+  const root = $(id);
+  if (!positions.length) { root.innerHTML = '<div class="empty">Belum ada posisi paper sniper yang tercatat.</div>'; return; }
+  root.innerHTML = `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Pair / pool</th><th>Amount</th><th>Entry → exit</th><th>Costs</th><th>PnL</th><th>Status / alasan</th></tr></thead><tbody>${positions.map(position => {
+    const timestamp = Number(position.closed_at || position.opened_at || position.updated_at); const time = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    const positionPnl = Number(position.pnl); const pnlCell = formatModelPnl(positionPnl); const pnlClass = Number.isFinite(positionPnl) ? (positionPnl < 0 ? 'neg' : 'pos') : '';
+    return `<tr><td>${esc(time)}</td><td><strong>${esc(position.instrument || '—')}</strong></td><td>${esc(formatModelNumber(position.token_amount))}</td><td>${esc(formatModelNumber(position.entry_value))} → ${esc(formatModelNumber(position.exit_value))}</td><td>${esc(formatModelNumber(position.costs))}</td><td class="${pnlClass}">${esc(pnlCell)}</td><td><span class="pill ${String(position.status).toLowerCase() === 'open' ? 'buy' : 'sell'}">${esc(position.status || '—')}</span>${position.reason ? `<div class="muted">${esc(position.reason)}</div>` : ''}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
 function renderPaperPerformance(result) {
   const aggregate = result && result.aggregate && typeof result.aggregate === 'object' ? result.aggregate : {};
   const positions = result && Array.isArray(result.positions) ? result.positions : [];
-  const pnl = Number(aggregate.total_pnl); const pnlText = Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatModelNumber(pnl)}` : '—';
-  $('paperPnl').textContent = pnlText; $('paperPnl').className = `metric ${Number.isFinite(pnl) ? (pnl < 0 ? 'neg' : 'pos') : ''}`;
-  renderModelPnl('paperRealizedPnl', aggregate.realized_pnl);
-  renderModelPnl('paperUnrealizedPnl', aggregate.unrealized_pnl);
-  $('paperCounts').textContent = `${formatModelNumber(aggregate.open_positions)} / ${formatModelNumber(aggregate.closed_positions)}`;
-  $('paperWinLoss').textContent = `${formatModelNumber(aggregate.winning_positions)} / ${formatModelNumber(aggregate.losing_positions)}`;
-  $('paperCosts').textContent = formatModelNumber(aggregate.total_costs);
-  if (!positions.length) { $('paperPositionTable').innerHTML = '<div class="empty">Belum ada posisi paper yang tercatat.</div>'; return; }
-  $('paperPositionTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Strategi</th><th>Pair / pool</th><th>Amount</th><th>Entry → exit</th><th>Costs</th><th>PnL</th><th>Status / alasan</th></tr></thead><tbody>${positions.map(position => {
-    const timestamp = Number(position.closed_at || position.opened_at || position.updated_at); const time = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
-    const positionPnl = Number(position.pnl); const pnlCell = Number.isFinite(positionPnl) ? `${positionPnl >= 0 ? '+' : ''}${formatModelNumber(positionPnl)}` : '—';
-    const pnlClass = Number.isFinite(positionPnl) ? (positionPnl < 0 ? 'neg' : 'pos') : '';
-    return `<tr><td>${esc(time)}</td><td>${esc(position.strategy || '—')}</td><td><strong>${esc(position.instrument || '—')}</strong></td><td>${esc(formatModelNumber(position.token_amount))}</td><td>${esc(formatModelNumber(position.entry_value))} → ${esc(formatModelNumber(position.exit_value))}</td><td>${esc(formatModelNumber(position.costs))}</td><td class="${pnlClass}">${esc(pnlCell)}</td><td><span class="pill ${String(position.status).toLowerCase() === 'open' ? 'buy' : 'sell'}">${esc(position.status || '—')}</span>${position.reason ? `<div class="muted">${esc(position.reason)}</div>` : ''}</td></tr>`;
-  }).join('')}</tbody></table></div>`;
+  const sniperPositions = positions.filter(position => String(position.strategy || '').toLowerCase() === 'sniper');
+  const sniperAggregate = aggregatePaperPositions(sniperPositions);
+  const pnl = Number(aggregate.total_pnl);
+  $('overviewPaperPnl').textContent = formatModelPnl(pnl); $('overviewPaperPnl').className = `metric ${Number.isFinite(pnl) ? (pnl < 0 ? 'neg' : 'pos') : ''}`;
+  $('overviewPaperCounts').textContent = `${formatModelNumber(aggregate.open_positions)} / ${formatModelNumber(aggregate.closed_positions)}`;
+  const sniperPnl = Number(sniperAggregate.total_pnl);
+  $('sniperPaperPnl').textContent = formatModelPnl(sniperPnl); $('sniperPaperPnl').className = `metric ${Number.isFinite(sniperPnl) ? (sniperPnl < 0 ? 'neg' : 'pos') : ''}`;
+  renderModelPnl('sniperPaperRealizedPnl', sniperAggregate.realized_pnl);
+  renderModelPnl('sniperPaperUnrealizedPnl', sniperAggregate.unrealized_pnl);
+  $('sniperPaperCounts').textContent = `${sniperAggregate.open_positions} / ${sniperAggregate.closed_positions}`;
+  $('sniperPaperWinLoss').textContent = `${sniperAggregate.winning_positions} / ${sniperAggregate.losing_positions}`;
+  $('sniperPaperCosts').textContent = formatModelNumber(sniperAggregate.total_costs);
+  renderPaperPositionTable('sniperPaperPositionTable', sniperPositions);
 }
 function renderTrades(result) {
   const trades = result && Array.isArray(result.trades) ? result.trades : [];
@@ -289,20 +322,32 @@ function renderSignals(result) {
   }).join('')}</tbody></table></div>`;
 }
 function renderOptionalStrategies(result) {
-  const text = result.available ? 'Endpoint strategi tersedia. Detail konfigurasi bisa dilihat di tab Overview.' : 'Belum tersedia dari server ini.';
-  ['strategySniper', 'strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = text; });
+  const strategies = result && result.available && result.data && Array.isArray(result.data.strategies) ? result.data.strategies : [];
+  const sniper = strategies.find(strategy => strategy && strategy.name === 'sniper');
+  if (sniper) {
+    const paper = sniper.paper_simulation && typeof sniper.paper_simulation === 'object' ? sniper.paper_simulation : {};
+    $('strategySniper').textContent = `Strategi: ${sniper.enabled ? 'enabled' : 'disabled'} · factory: ${formatModelNumber(sniper.configured_factories)} · max buy: ${sniper.max_buy_eth || '—'} ETH · min liquidity: ${sniper.min_liquidity_eth || '—'} ETH · TP/SL: ${sniper.auto_tp_pct || '—'}% / ${sniper.auto_sl_pct || '—'}% · simulator: ${paper.enabled ? 'enabled' : 'disabled'} · poll: ${formatModelNumber(paper.poll_interval_ms)} ms · fee: ${formatModelNumber(paper.amm_fee_bps)} bps · gas entry+exit: ${paper.entry_exit_gas_eth || '—'} ETH.`;
+  } else {
+    $('strategySniper').textContent = 'Konfigurasi sniper belum tersedia dari server ini.';
+  }
+  const text = result && result.available ? 'Endpoint strategi tersedia. Konfigurasi dikelola dari server.' : 'Belum tersedia dari server ini.';
+  ['strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = text; });
+}
+function renderDecisionTable(id, decisions, emptyText, includeStrategy) {
+  const root = $(id); root.replaceChildren();
+  if (!decisions.length) { root.className = 'empty'; root.textContent = emptyText; return; }
+  root.className = ''; const wrap = document.createElement('div'); wrap.className = 'table-wrap'; const table = document.createElement('table'); const head = document.createElement('thead'); const header = document.createElement('tr'); const labels = includeStrategy ? ['Waktu', 'Strategi', 'Pair', 'Keputusan', 'Alasan'] : ['Waktu', 'Pair', 'Keputusan', 'Alasan']; labels.forEach(label => { const th = document.createElement('th'); th.textContent = label; header.appendChild(th); }); head.appendChild(header); table.appendChild(head); const body = document.createElement('tbody');
+  decisions.forEach(item => { const row = document.createElement('tr'); const time = new Date(item.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); appendCell(row, time); if (includeStrategy) appendCell(row, item.strategy || '—'); appendCell(row, item.pair || '—'); appendCell(row, item.decision || '—'); const reasons = Array.isArray(item.reasons) ? item.reasons.join(' · ') : String(item.reasons || '—'); appendCell(row, reasons, 'muted'); body.appendChild(row); }); table.appendChild(body); wrap.appendChild(table); root.appendChild(wrap);
 }
 function renderDecisions(result) {
-  const root = $('decisionTable'); const decisions = result && Array.isArray(result.decisions) ? result.decisions : [];
-  root.replaceChildren();
-  if (!decisions.length) { root.className = 'empty'; root.textContent = 'Belum ada keputusan strategi yang tercatat.'; return; }
-  root.className = ''; const wrap = document.createElement('div'); wrap.className = 'table-wrap'; const table = document.createElement('table'); const head = document.createElement('thead'); const header = document.createElement('tr'); ['Waktu', 'Strategi', 'Pair', 'Keputusan', 'Alasan'].forEach(label => { const th = document.createElement('th'); th.textContent = label; header.appendChild(th); }); head.appendChild(header); table.appendChild(head); const body = document.createElement('tbody');
-  decisions.forEach(item => { const row = document.createElement('tr'); const time = new Date(item.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); appendCell(row, time); appendCell(row, item.strategy || '—'); appendCell(row, item.pair || '—'); appendCell(row, item.decision || '—'); const reasons = Array.isArray(item.reasons) ? item.reasons.join(' · ') : String(item.reasons || '—'); appendCell(row, reasons, 'muted'); body.appendChild(row); }); table.appendChild(body); wrap.appendChild(table); root.appendChild(wrap);
+  const decisions = result && Array.isArray(result.decisions) ? result.decisions : [];
+  renderDecisionTable('decisionTable', decisions, 'Belum ada keputusan strategi yang tercatat.', true);
+  renderDecisionTable('sniperDecisionTable', decisions.filter(item => String(item.strategy || '').toLowerCase() === 'sniper'), 'Belum ada keputusan sniper yang tercatat.', false);
 }
 async function loadAll() {
   try {
     const [status, trades, signals, decisions, paperPerformance] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals'), api('/api/decisions'), api('/api/paper-performance')]);
-    renderStatus(status); renderTrades(trades); renderSignals(signals); renderDecisions(decisions); renderPaperPerformance(paperPerformance); localDecisions = decisions && Array.isArray(decisions.decisions) ? decisions.decisions : []; setConnection('Polling aktif', 'ok');
+    renderStatus(status); renderTrades(trades); renderSignals(signals); localDecisions = decisions && Array.isArray(decisions.decisions) ? decisions.decisions : []; renderDecisions({ decisions: localDecisions }); renderPaperPerformance(paperPerformance); setConnection('Polling aktif', 'ok');
     const strategies = await optionalApi('/api/strategies'); renderOptionalStrategies(strategies);
   } catch (error) {
     if (error.message === 'unauthorized') return;
@@ -335,8 +380,8 @@ function connectWebSocket() {
               localTrades = msg.trades && Array.isArray(msg.trades.trades) ? msg.trades.trades : [];
               renderSignals(msg.signals);
               localSignals = msg.signals && Array.isArray(msg.signals.signals) ? msg.signals.signals : [];
-              renderDecisions(msg.decisions);
               localDecisions = msg.decisions && Array.isArray(msg.decisions.decisions) ? msg.decisions.decisions : [];
+              renderDecisions({ decisions: localDecisions });
               renderPaperPerformance(msg.paper_performance);
               renderOptionalStrategies({ available: true, data: msg.strategies });
               break;
@@ -388,7 +433,8 @@ function connectWebSocket() {
 async function doStop() { if (!confirm('Stop bot? Semua order baru dihentikan dan bot perlu dinyalakan lagi manual di server.')) return; try { await api('/api/stop', 'POST'); setConnection('Bot dihentikan', 'bad'); } catch (error) { alert(`Gagal menghentikan bot: ${error.message}`); } }
 async function doResume() { if (!confirm('Clear halt hanya setelah Anda meninjau penyebabnya. Lanjutkan?')) return; try { await api('/api/resume', 'POST'); } catch (error) { alert(`Gagal clear halt: ${error.message}`); } }
 async function doHalt() { if (!confirm('Emergency halt: hentikan SEMUA order buy baru sekarang? Monitoring tetap berjalan.')) return; try { await api('/api/halt', 'POST'); } catch (error) { alert(`Gagal halt: ${error.message}`); } }
-document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }));
+function activateTab(tab) { document.querySelectorAll('[role="tab"]').forEach(item => item.setAttribute('aria-selected', String(item === tab))); document.querySelectorAll('[role="tabpanel"]').forEach(panel => { panel.hidden = panel.id !== tab.dataset.tab; }); tab.focus(); }
+document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('click', () => activateTab(tab)));
 
 function showChart(pairStr) {
   if (!pairStr || pairStr === '—') return;
@@ -404,6 +450,7 @@ $('haltBtn').addEventListener('click', doHalt);
 $('resumeBtn').addEventListener('click', doResume);
 $('stopBtn').addEventListener('click', doStop);
 $('reloadBtn').addEventListener('click', loadAll);
+$('goToSniperBtn').addEventListener('click', () => activateTab($('tab-sniper')));
 
 connectWebSocket();
 </script>

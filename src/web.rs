@@ -199,6 +199,14 @@ fn build_strategies_json(strategies: &StrategiesCfg) -> Value {
             "configured_factories": strategies.sniper.dex_factories.len(),
             "max_buy_eth": strategies.sniper.max_buy_eth.to_string(),
             "min_liquidity_eth": strategies.sniper.min_liquidity_eth.to_string(),
+            "auto_tp_pct": strategies.sniper.auto_tp_pct.to_string(),
+            "auto_sl_pct": strategies.sniper.auto_sl_pct.to_string(),
+            "paper_simulation": {
+                "enabled": strategies.sniper.paper_simulation.enabled,
+                "poll_interval_ms": strategies.sniper.paper_simulation.poll_interval_ms,
+                "amm_fee_bps": strategies.sniper.paper_simulation.amm_fee_bps,
+                "entry_exit_gas_eth": strategies.sniper.paper_simulation.entry_exit_gas_eth.to_string(),
+            },
         },
         {
             "name": "copy_onchain",
