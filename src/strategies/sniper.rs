@@ -26,6 +26,8 @@ use super::{SharedState, Strategy};
 const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
 const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
 const MAX_OPEN_PAPER_POSITIONS: usize = 100;
+const RESERVE_RPC_MAX_ATTEMPTS: u32 = 3;
+const RESERVE_RPC_INITIAL_BACKOFF_MS: u64 = 100;
 
 #[derive(Debug, Clone, Copy)]
 struct Candidate {
@@ -368,22 +370,42 @@ async fn read_reserves(
     pool: Address,
     provider: &alloy::providers::RootProvider,
 ) -> Option<(U256, U256)> {
+    for attempt in 1..=RESERVE_RPC_MAX_ATTEMPTS {
+        match read_reserves_once(pool, provider).await {
+            Ok(reserves) => return Some(reserves),
+            Err(error) => {
+                if let Some(delay_ms) = reserve_retry_delay_ms(attempt) {
+                    tracing::debug!(%pool, attempt, delay_ms, %error, "getReserves V2 gagal; retry terbatas");
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                } else {
+                    tracing::warn!(%pool, attempt, max_attempts = RESERVE_RPC_MAX_ATTEMPTS, %error, "getReserves V2 gagal setelah retry terbatas");
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn read_reserves_once(
+    pool: Address,
+    provider: &alloy::providers::RootProvider,
+) -> Result<(U256, U256), String> {
     let request = TransactionRequest::default()
         .with_to(pool)
         .with_input(Bytes::from(IUniswapV2Pair::getReservesCall {}.abi_encode()));
-    match provider.call(request).await {
-        Ok(output) => match IUniswapV2Pair::getReservesCall::abi_decode_returns(&output) {
-            Ok(reserves) => Some((U256::from(reserves.reserve0), U256::from(reserves.reserve1))),
-            Err(error) => {
-                tracing::warn!(%pool, %error, "decode getReserves V2 gagal");
-                None
-            }
-        },
-        Err(error) => {
-            tracing::warn!(%pool, %error, "getReserves V2 gagal");
-            None
-        }
-    }
+    let output = provider
+        .call(request)
+        .await
+        .map_err(|error| error.to_string())?;
+    let reserves = IUniswapV2Pair::getReservesCall::abi_decode_returns(&output)
+        .map_err(|error| format!("decode getReserves V2 gagal: {error}"))?;
+    Ok((U256::from(reserves.reserve0), U256::from(reserves.reserve1)))
+}
+
+fn reserve_retry_delay_ms(attempt: u32) -> Option<u64> {
+    (1..RESERVE_RPC_MAX_ATTEMPTS)
+        .contains(&attempt)
+        .then(|| RESERVE_RPC_INITIAL_BACKOFF_MS << (attempt - 1))
 }
 
 fn v2_factory_supported(factory: Address, addresses: &crate::config::BaseAddresses) -> bool {
@@ -611,6 +633,15 @@ mod tests {
         assert!(paper_simulator_active(&cfg, crate::config::Mode::Paper));
         assert!(!paper_simulator_active(&cfg, crate::config::Mode::Testnet));
         assert!(!paper_simulator_active(&cfg, crate::config::Mode::Live));
+    }
+
+    #[test]
+    fn reserve_retry_delays_are_bounded_and_exponential() {
+        assert_eq!(reserve_retry_delay_ms(0), None);
+        assert_eq!(reserve_retry_delay_ms(1), Some(100));
+        assert_eq!(reserve_retry_delay_ms(2), Some(200));
+        assert_eq!(reserve_retry_delay_ms(3), None);
+        assert_eq!(reserve_retry_delay_ms(4), None);
     }
 
     #[test]
