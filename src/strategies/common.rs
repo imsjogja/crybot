@@ -81,7 +81,7 @@ impl StrategyContext {
 }
 
 pub fn get_amount_out(amount_in: U256, reserve_in: U256, reserve_out: U256, fee_bps: u32) -> U256 {
-    if reserve_in.is_zero() || reserve_out.is_zero() || amount_in.is_zero() {
+    if fee_bps >= 10_000 || reserve_in.is_zero() || reserve_out.is_zero() || amount_in.is_zero() {
         return U256::ZERO;
     }
     let fee_bps = U256::from(fee_bps);
@@ -153,6 +153,14 @@ mod tests {
     fn test_get_amount_out_zero_input() {
         let out = get_amount_out(U256::ZERO, U256::from(1_000u64), U256::from(1_000u64), 30);
         assert!(out.is_zero());
+    }
+
+    #[test]
+    fn test_get_amount_out_rejects_fee_at_or_above_ten_thousand_bps() {
+        let amount = U256::from(1_000u64);
+        let reserve = U256::from(10_000u64);
+        assert!(get_amount_out(amount, reserve, reserve, 10_000).is_zero());
+        assert!(get_amount_out(amount, reserve, reserve, 10_001).is_zero());
     }
 
     #[test]

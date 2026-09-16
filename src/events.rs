@@ -135,6 +135,10 @@ pub enum WsBroadcast {
         signals: serde_json::Value,
         decisions: serde_json::Value,
         strategies: serde_json::Value,
+        paper_performance: serde_json::Value,
+    },
+    PaperPerformanceUpdate {
+        data: serde_json::Value,
     },
     NewDecision {
         ts_ms: i64,

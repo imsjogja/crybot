@@ -35,6 +35,8 @@ const SIGNAL_COOLDOWN_MS: i64 = 60_000;
 /// State global yang di-share ke semua strategi via trait `Strategy`.
 #[allow(dead_code)]
 pub struct SharedState {
+    /// Mode aplikasi; strategi paper-only harus menolaknya di luar paper.
+    pub mode: crate::config::Mode,
     /// Konfigurasi semua strategi (dari config.yaml).
     pub config: StrategiesCfg,
     /// Alamat kontrak penting Base Network (router, factory, dll).
@@ -50,6 +52,8 @@ pub struct SharedState {
     pub tx_monitor: mpsc::Sender<MonitorMsg>,
     /// Channel untuk mengirim Base Network orders ke base executor.
     pub tx_base_order: mpsc::Sender<crate::execution::base_executor::BaseOrder>,
+    /// Provider Base read-only untuk strategi yang memerlukan RPC query.
+    pub provider: alloy::providers::RootProvider,
     /// Metrics pipeline (blueprint §13) — sinyal yang lolos ambang dihitung di sini.
     pub metrics: SharedMetrics,
 }

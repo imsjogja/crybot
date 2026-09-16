@@ -130,6 +130,8 @@
         <article class="card"><h2>Feed Base</h2><p>Header dan log factory yang diterima connector.</p><div class="rows"><div class="row"><span>New heads</span><span id="mNewHeads">—</span></div><div class="row"><span>Factory logs raw</span><span id="mFactoryLogs">—</span></div><div class="row"><span>Pool terdecode</span><span id="mPoolsDetected">—</span></div><div class="row"><span>Factory topic tidak dikenal</span><span id="mFactoryUnknownLogs">—</span></div></div></article>
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2 id="activeStrategyTitle">Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
+        <article class="card wide"><h2>Paper performance <span class="pill err">MODEL</span></h2><p>Simulasi posisi; bukan saldo, fill, atau keuntungan live.</p><div class="metric" id="paperPnl">—</div><div class="rows"><div class="row"><span>Realized PnL (closed)</span><span id="paperRealizedPnl">—</span></div><div class="row"><span>Unrealized PnL (open)</span><span id="paperUnrealizedPnl">—</span></div><div class="row"><span>Posisi open / closed</span><span id="paperCounts">—</span></div><div class="row"><span>Menang / kalah (closed)</span><span id="paperWinLoss">—</span></div><div class="row"><span>Total model gas/cost</span><span id="paperCosts">—</span></div></div></article>
+        <article class="card full"><h2>Posisi paper terbaru <span class="pill err">MODEL</span></h2><p>Lifecycle dan PnL simulasi dari event paper; tidak menggambarkan eksekusi on-chain.</p><div id="paperPositionTable" class="empty">Memuat posisi paper…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
         <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
         <article class="card full"><h2>Log keputusan strategi</h2><p>Keputusan kandidat dan skip yang telah tersimpan. Tidak mencatat setiap block.</p><div id="decisionTable" class="empty">Memuat keputusan…</div></article>
@@ -152,7 +154,7 @@
       </div>
     </section>
 
-    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden><div class="feature"><h2>Token Sniper</h2><p>Monitoring pool/token baru di Base. crybot saat ini belum menyediakan kontrol sniper melalui dashboard.</p><div class="feature-grid"><div class="info-box"><h3>Status strategi</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div><div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div></div></div></section>
+    <section id="sniper" role="tabpanel" aria-labelledby="tab-sniper" hidden><div class="feature"><h2>Token Sniper</h2><p>Monitoring pool/token baru di Base. crybot saat ini belum menyediakan kontrol sniper melalui dashboard.</p><div class="feature-grid"><div class="info-box"><h3>Status simulator</h3><p id="strategySniper">Memeriksa endpoint strategi…</p></div><div class="info-box"><h3>Lifecycle paper</h3><p>Simulator membuka posisi virtual dari quote reserve, memperbarui valuasi saat posisi tetap open, lalu menutupnya hanya ketika ambang take-profit atau stop-loss virtual tercapai. Tidak ada transaksi on-chain.</p></div><div class="info-box"><h3>Model biaya</h3><p>Estimasi gas entry+exit dicatat sekali untuk setiap posisi paper. Realized PnL hanya berasal dari posisi closed; valuasi posisi open tetap unrealized.</p></div><div class="info-box"><h3>Langkah aman</h3><p>Mulai dari paper mode, tentukan batas nilai order dan cek likuiditas sebelum menjalankan strategi apa pun.</p></div></div></div></section>
     <section id="copy" role="tabpanel" aria-labelledby="tab-copy" hidden><div class="feature"><h2>Copy Wallet</h2><p>Bot dapat melaporkan aktivitas wallet target on-chain. Pengaturan wallet tetap dilakukan melalui konfigurasi server.</p><div class="feature-grid"><div class="info-box"><h3>Status</h3><p id="copySummary">Memuat data status…</p></div><div class="info-box"><h3>Untuk pemula</h3><p>Copy trading on-chain tidak menjamin hasil sama. Slippage, gas, dan kecepatan block dapat berbeda.</p></div></div></div></section>
     <section id="grid" role="tabpanel" aria-labelledby="tab-grid" hidden><div class="feature"><h2>Grid &amp; DCA</h2><p>Grid membagi order di rentang harga; DCA membeli berkala. Keduanya belum dapat diatur dari dashboard ini.</p><div class="info-box"><h3>Keamanan</h3><p>Jangan menganggap strategi otomatis bebas risiko. Tentukan anggaran maksimum sebelum mengaktifkan dari konfigurasi bot.</p></div></div></section>
     <section id="arbitrage" role="tabpanel" aria-labelledby="tab-arbitrage" hidden><div class="feature"><h2>Arbitrage</h2><p>Arbitrage mencari perbedaan harga antar DEX di Base, tetapi biaya, slippage, dan gas dapat menghapus peluang.</p><div class="info-box"><h3>Status</h3><p id="strategyArbitrage">Memeriksa endpoint strategi…</p></div></div></section>
@@ -229,6 +231,26 @@ function renderStatus(s) {
   $('copySummary').textContent = `${metrics.orders ?? 0} order, ${metrics.fills ?? 0} fill, ${metrics.errors ?? 0} error.`;
   setSafetyBanner(s);
 }
+function formatModelNumber(value) { const parsed = Number(value); return Number.isFinite(parsed) ? parsed.toLocaleString('en-US', { maximumFractionDigits: 6 }) : '—'; }
+function renderModelPnl(id, value) { const parsed = Number(value); const node = $(id); node.textContent = Number.isFinite(parsed) ? `${parsed >= 0 ? '+' : ''}${formatModelNumber(parsed)}` : '—'; node.className = Number.isFinite(parsed) ? (parsed < 0 ? 'neg' : 'pos') : ''; }
+function renderPaperPerformance(result) {
+  const aggregate = result && result.aggregate && typeof result.aggregate === 'object' ? result.aggregate : {};
+  const positions = result && Array.isArray(result.positions) ? result.positions : [];
+  const pnl = Number(aggregate.total_pnl); const pnlText = Number.isFinite(pnl) ? `${pnl >= 0 ? '+' : ''}${formatModelNumber(pnl)}` : '—';
+  $('paperPnl').textContent = pnlText; $('paperPnl').className = `metric ${Number.isFinite(pnl) ? (pnl < 0 ? 'neg' : 'pos') : ''}`;
+  renderModelPnl('paperRealizedPnl', aggregate.realized_pnl);
+  renderModelPnl('paperUnrealizedPnl', aggregate.unrealized_pnl);
+  $('paperCounts').textContent = `${formatModelNumber(aggregate.open_positions)} / ${formatModelNumber(aggregate.closed_positions)}`;
+  $('paperWinLoss').textContent = `${formatModelNumber(aggregate.winning_positions)} / ${formatModelNumber(aggregate.losing_positions)}`;
+  $('paperCosts').textContent = formatModelNumber(aggregate.total_costs);
+  if (!positions.length) { $('paperPositionTable').innerHTML = '<div class="empty">Belum ada posisi paper yang tercatat.</div>'; return; }
+  $('paperPositionTable').innerHTML = `<div class="table-wrap"><table><thead><tr><th>Waktu</th><th>Strategi</th><th>Pair / pool</th><th>Amount</th><th>Entry → exit</th><th>Costs</th><th>PnL</th><th>Status / alasan</th></tr></thead><tbody>${positions.map(position => {
+    const timestamp = Number(position.closed_at || position.opened_at || position.updated_at); const time = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '—';
+    const positionPnl = Number(position.pnl); const pnlCell = Number.isFinite(positionPnl) ? `${positionPnl >= 0 ? '+' : ''}${formatModelNumber(positionPnl)}` : '—';
+    const pnlClass = Number.isFinite(positionPnl) ? (positionPnl < 0 ? 'neg' : 'pos') : '';
+    return `<tr><td>${esc(time)}</td><td>${esc(position.strategy || '—')}</td><td><strong>${esc(position.instrument || '—')}</strong></td><td>${esc(formatModelNumber(position.token_amount))}</td><td>${esc(formatModelNumber(position.entry_value))} → ${esc(formatModelNumber(position.exit_value))}</td><td>${esc(formatModelNumber(position.costs))}</td><td class="${pnlClass}">${esc(pnlCell)}</td><td><span class="pill ${String(position.status).toLowerCase() === 'open' ? 'buy' : 'sell'}">${esc(position.status || '—')}</span>${position.reason ? `<div class="muted">${esc(position.reason)}</div>` : ''}</td></tr>`;
+  }).join('')}</tbody></table></div>`;
+}
 function renderTrades(result) {
   const trades = result && Array.isArray(result.trades) ? result.trades : [];
   const html = trades.length ? buildTradeTable(trades) : '<div class="empty">Belum ada aktivitas Base yang tercatat.</div>';
@@ -279,8 +301,8 @@ function renderDecisions(result) {
 }
 async function loadAll() {
   try {
-    const [status, trades, signals, decisions] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals'), api('/api/decisions')]);
-    renderStatus(status); renderTrades(trades); renderSignals(signals); renderDecisions(decisions); localDecisions = decisions && Array.isArray(decisions.decisions) ? decisions.decisions : []; setConnection('Polling aktif', 'ok');
+    const [status, trades, signals, decisions, paperPerformance] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals'), api('/api/decisions'), api('/api/paper-performance')]);
+    renderStatus(status); renderTrades(trades); renderSignals(signals); renderDecisions(decisions); renderPaperPerformance(paperPerformance); localDecisions = decisions && Array.isArray(decisions.decisions) ? decisions.decisions : []; setConnection('Polling aktif', 'ok');
     const strategies = await optionalApi('/api/strategies'); renderOptionalStrategies(strategies);
   } catch (error) {
     if (error.message === 'unauthorized') return;
@@ -315,10 +337,14 @@ function connectWebSocket() {
               localSignals = msg.signals && Array.isArray(msg.signals.signals) ? msg.signals.signals : [];
               renderDecisions(msg.decisions);
               localDecisions = msg.decisions && Array.isArray(msg.decisions.decisions) ? msg.decisions.decisions : [];
+              renderPaperPerformance(msg.paper_performance);
               renderOptionalStrategies({ available: true, data: msg.strategies });
               break;
             case 'StatusUpdate':
               renderStatus(msg.data);
+              break;
+            case 'PaperPerformanceUpdate':
+              renderPaperPerformance(msg.data);
               break;
             case 'NewDecision': {
               const decision = { ts_ms: msg.ts_ms, strategy: msg.strategy, pair: msg.pair, decision: msg.decision, reasons: msg.reasons, data: msg.data };

@@ -68,6 +68,12 @@ strategies:
     min_liquidity_eth: "1.0"
     auto_tp_pct: "50"
     auto_sl_pct: "20"
+    # Simulator V2 read-only; tidak pernah membangun atau mengirim transaksi.
+    paper_simulation:
+      enabled: false
+      poll_interval_ms: 5000
+      amm_fee_bps: 30
+      entry_exit_gas_eth: "0.0001"
     safety:
       check_honeypot: true
       check_ownership_renounced: true

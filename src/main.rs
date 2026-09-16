@@ -78,6 +78,7 @@ async fn main() -> Result<()> {
     let pool = store::init_pool(&cfg.store.sqlite_path).await?;
 
     let shared = SharedState {
+        mode: cfg.mode,
         config: cfg.strategies.clone(),
         base_addresses: cfg.base.addresses.clone(),
         market: market.clone(),
@@ -85,6 +86,7 @@ async fn main() -> Result<()> {
         tx_log: tx_log.clone(),
         tx_monitor: tx_monitor.clone(),
         tx_base_order,
+        provider: connector.provider().clone(),
         metrics: metrics.clone(),
     };
     let strategy_engine = StrategyEngine::new(&cfg, rx_strategy_event, shared);

@@ -130,6 +130,39 @@ pub async fn init_pool(path: &str) -> Result<SqlitePool> {
         .execute(&pool)
         .await?;
 
+    // Posisi model paper terpisah dari posisi/execution live.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS paper_positions (
+            id           TEXT PRIMARY KEY,
+            strategy     TEXT NOT NULL,
+            instrument   TEXT NOT NULL,
+            token_amount REAL,
+            entry_value  REAL,
+            exit_value   REAL,
+            costs        REAL NOT NULL DEFAULT 0,
+            pnl          REAL,
+            status       TEXT NOT NULL,
+            reason       TEXT,
+            opened_at    INTEGER NOT NULL,
+            closed_at    INTEGER,
+            updated_at   INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_paper_positions_recent
+         ON paper_positions(updated_at DESC)",
+    )
+    .execute(&pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_paper_positions_status
+         ON paper_positions(status, updated_at DESC)",
+    )
+    .execute(&pool)
+    .await?;
+
     // Tabel snipe targets (BARU).
     sqlx::query(
         "CREATE TABLE IF NOT EXISTS snipe_targets (
@@ -286,6 +319,248 @@ pub async fn recent_decisions(pool: &SqlitePool, limit: i64) -> Result<Vec<Decis
     .await?)
 }
 
+/// Ringkasan posisi model paper untuk API/dashboard.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct PaperPerformanceAggregate {
+    pub total_positions: i64,
+    pub open_positions: i64,
+    pub closed_positions: i64,
+    pub winning_positions: i64,
+    pub losing_positions: i64,
+    pub realized_pnl: f64,
+    pub unrealized_pnl: f64,
+    pub total_pnl: f64,
+    pub total_costs: f64,
+}
+
+/// Posisi paper terbaru, baik masih terbuka maupun sudah ditutup.
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct PaperPositionRow {
+    pub id: String,
+    pub strategy: String,
+    pub instrument: String,
+    pub token_amount: Option<f64>,
+    pub entry_value: Option<f64>,
+    pub exit_value: Option<f64>,
+    pub costs: f64,
+    pub pnl: Option<f64>,
+    pub status: String,
+    pub reason: Option<String>,
+    pub opened_at: i64,
+    pub closed_at: Option<i64>,
+    pub updated_at: i64,
+}
+
+pub async fn paper_performance(
+    pool: &SqlitePool,
+) -> Result<(PaperPerformanceAggregate, Vec<PaperPositionRow>)> {
+    let aggregate = sqlx::query_as::<_, PaperPerformanceAggregate>(
+        "SELECT
+            COUNT(*) AS total_positions,
+            COALESCE(SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_positions,
+            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS closed_positions,
+            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL AND pnl > 0 THEN 1 ELSE 0 END), 0) AS winning_positions,
+            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL AND pnl < 0 THEN 1 ELSE 0 END), 0) AS losing_positions,
+            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL THEN pnl ELSE 0.0 END), 0.0) AS realized_pnl,
+            COALESCE(SUM(CASE WHEN closed_at IS NULL THEN pnl ELSE 0.0 END), 0.0) AS unrealized_pnl,
+            COALESCE(SUM(pnl), 0.0) AS total_pnl,
+            COALESCE(SUM(costs), 0.0) AS total_costs
+         FROM paper_positions",
+    )
+    .fetch_one(pool)
+    .await?;
+    let positions = sqlx::query_as::<_, PaperPositionRow>(
+        "SELECT id, strategy, instrument, token_amount, entry_value, exit_value,
+                costs, pnl, status, reason, opened_at, closed_at, updated_at
+         FROM paper_positions
+         ORDER BY updated_at DESC, rowid DESC LIMIT 100",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok((aggregate, positions))
+}
+
+pub async fn paper_performance_json(pool: &SqlitePool) -> Result<serde_json::Value> {
+    let (aggregate, positions) = paper_performance(pool).await?;
+    Ok(serde_json::json!({"aggregate": aggregate, "positions": positions}))
+}
+
+fn value_string(value: &serde_json::Value, names: &[&str]) -> Option<String> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|value| match value {
+            serde_json::Value::String(text) if !text.trim().is_empty() => {
+                Some(text.trim().to_owned())
+            }
+            serde_json::Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn value_f64(value: &serde_json::Value, names: &[&str]) -> Option<f64> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_f64(),
+            serde_json::Value::String(text) => text.trim().parse().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn value_i64(value: &serde_json::Value, names: &[&str]) -> Option<i64> {
+    names.iter().find_map(|name| {
+        value.get(*name).and_then(|value| match value {
+            serde_json::Value::Number(number) => number.as_i64(),
+            serde_json::Value::String(text) => text.trim().parse().ok(),
+            _ => None,
+        })
+    })
+}
+
+async fn write_paper_position(pool: &SqlitePool, entry: &LogEntry) -> Result<bool> {
+    let parsed: serde_json::Value = match serde_json::from_str::<serde_json::Value>(&entry.payload)
+    {
+        Ok(value) if value.is_object() => value,
+        Ok(_) | Err(_) => {
+            tracing::warn!(kind = %entry.kind, "payload paper position bukan objek JSON");
+            return Ok(false);
+        }
+    };
+    let Some(id) = value_string(&parsed, &["id", "position_id"]) else {
+        tracing::warn!(kind = %entry.kind, "payload paper position tanpa id");
+        return Ok(false);
+    };
+
+    match entry.kind.as_str() {
+        "paper_position_opened" => {
+            let Some(strategy) = value_string(&parsed, &["strategy"]) else {
+                tracing::warn!(id = %id, "payload paper position open tanpa strategy");
+                return Ok(false);
+            };
+            let Some(instrument) = value_string(&parsed, &["pair", "pool", "instrument"]) else {
+                tracing::warn!(id = %id, "payload paper position open tanpa pair/pool");
+                return Ok(false);
+            };
+            let opened_at = value_i64(
+                &parsed,
+                &["opened_at", "opened_at_ms", "ts_ms", "timestamp"],
+            )
+            .unwrap_or(entry.ts_ms);
+            let status = value_string(&parsed, &["status"]).unwrap_or_else(|| "open".into());
+            sqlx::query(
+                "INSERT INTO paper_positions (
+                    id, strategy, instrument, token_amount, entry_value, costs, pnl,
+                    status, reason, opened_at, closed_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)
+                 ON CONFLICT(id) DO UPDATE SET
+                    strategy = excluded.strategy, instrument = excluded.instrument,
+                    token_amount = excluded.token_amount, entry_value = excluded.entry_value,
+                    costs = excluded.costs, pnl = excluded.pnl, status = excluded.status,
+                    reason = excluded.reason, opened_at = excluded.opened_at,
+                    closed_at = NULL, updated_at = excluded.updated_at",
+            )
+            .bind(id)
+            .bind(strategy)
+            .bind(instrument)
+            .bind(value_f64(
+                &parsed,
+                &["token_amount", "amount", "qty", "size"],
+            ))
+            .bind(value_f64(
+                &parsed,
+                &[
+                    "entry_value",
+                    "entry_cost_eth",
+                    "entry",
+                    "entry_price",
+                    "entry_value_usd",
+                ],
+            ))
+            .bind(value_f64(&parsed, &["costs", "cost", "fees", "fee"]).unwrap_or(0.0))
+            .bind(value_f64(&parsed, &["pnl", "pnl_value"]))
+            .bind(status)
+            .bind(value_string(&parsed, &["reason"]))
+            .bind(opened_at)
+            .bind(entry.ts_ms)
+            .execute(pool)
+            .await?;
+            Ok(true)
+        }
+        "paper_position_closed" => {
+            let Some(exit_value) = value_f64(
+                &parsed,
+                &[
+                    "exit_value",
+                    "net_exit_eth",
+                    "exit",
+                    "exit_price",
+                    "exit_value_usd",
+                ],
+            ) else {
+                tracing::warn!(id = %id, "payload paper position close tanpa exit_value valid");
+                return Ok(false);
+            };
+            let Some(pnl) = value_f64(&parsed, &["pnl", "pnl_value"]) else {
+                tracing::warn!(id = %id, "payload paper position close tanpa pnl valid");
+                return Ok(false);
+            };
+            let closed_at = value_i64(
+                &parsed,
+                &["closed_at", "closed_at_ms", "ts_ms", "timestamp"],
+            )
+            .unwrap_or(entry.ts_ms);
+            let updated = sqlx::query(
+                "UPDATE paper_positions SET
+                    exit_value = ?, pnl = ?, status = 'closed',
+                    reason = COALESCE(?, reason), closed_at = ?, updated_at = ?
+                 WHERE id = ? AND closed_at IS NULL",
+            )
+            .bind(exit_value)
+            .bind(pnl)
+            .bind(value_string(&parsed, &["reason", "close_reason"]))
+            .bind(closed_at)
+            .bind(entry.ts_ms)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+            if updated.rows_affected() == 0 {
+                tracing::warn!(id = %id, "paper position close tanpa posisi open tersimpan");
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        "paper_position_valued" => {
+            let Some(exit_value) = value_f64(
+                &parsed,
+                &["exit_value", "net_exit_eth", "value", "value_eth"],
+            ) else {
+                tracing::warn!(id = %id, "payload paper position valuation tanpa exit_value valid");
+                return Ok(false);
+            };
+            let Some(pnl) = value_f64(&parsed, &["pnl", "pnl_value"]) else {
+                tracing::warn!(id = %id, "payload paper position valuation tanpa pnl valid");
+                return Ok(false);
+            };
+            let updated = sqlx::query(
+                "UPDATE paper_positions SET exit_value = ?, pnl = ?, updated_at = ?
+                 WHERE id = ? AND closed_at IS NULL AND status = 'open'",
+            )
+            .bind(exit_value)
+            .bind(pnl)
+            .bind(entry.ts_ms)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+            if updated.rows_affected() == 0 {
+                tracing::warn!(id = %id, "paper position valuation tanpa posisi open tersimpan");
+                return Ok(false);
+            }
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
 /// Maksimum baris `events` per transaksi batch.
 const MAX_BATCH_SIZE: usize = 100;
 /// Maksimum penundaan flush batch — menjaga latency append tetap kecil.
@@ -356,6 +631,28 @@ async fn dual_write_structured(
     tx_ws: &tokio::sync::broadcast::Sender<String>,
     entry: &LogEntry,
 ) {
+    if matches!(
+        entry.kind.as_str(),
+        "paper_position_opened" | "paper_position_closed" | "paper_position_valued"
+    ) {
+        match write_paper_position(pool, entry).await {
+            Ok(true) => match paper_performance_json(pool).await {
+                Ok(data) => {
+                    let broadcast = WsBroadcast::PaperPerformanceUpdate { data };
+                    if let Ok(json) = serde_json::to_string(&broadcast) {
+                        let _ = tx_ws.send(json);
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "gagal membuat snapshot paper performance"),
+            },
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, kind = %entry.kind, "gagal dual-write paper position")
+            }
+        }
+        return;
+    }
+
     let parsed: serde_json::Value = serde_json::from_str(&entry.payload).unwrap_or_default();
     let result = match entry.kind.as_str() {
         "signal_created" => {
@@ -665,6 +962,200 @@ mod tests {
 
         drop(tx);
         handle.await.unwrap();
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn paper_positions_disimpan_diaggregate_dan_dibroadcast_setelah_close() {
+        let (pool, path) = pool_temp("paper-positions").await;
+        let (tx, rx) = mpsc::channel(16);
+        let (tx_ws, mut rx_ws) = tokio::sync::broadcast::channel(16);
+        let handle = tokio::spawn(run_store(rx, pool.clone(), tx_ws));
+
+        tx.send(LogEntry {
+            kind: "paper_position_opened".into(),
+            payload: serde_json::json!({
+                "id": "paper-1", "strategy": "sniper", "pool": "WETH/TOKEN",
+                "token_amount": "12.5", "entry_value": 100.0, "costs": "1.25",
+                "opened_at": 1000
+            })
+            .to_string(),
+            ts_ms: 1100,
+        })
+        .await
+        .unwrap();
+        let _: WsBroadcast = serde_json::from_str(
+            &tokio::time::timeout(Duration::from_secs(1), rx_ws.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+
+        tx.send(LogEntry {
+            kind: "paper_position_closed".into(),
+            payload: serde_json::json!({
+                "id": "paper-1", "exit_value": "125.0", "costs": 2.0,
+                "pnl": "23.0", "reason": "target", "closed_at_ms": 2000
+            })
+            .to_string(),
+            ts_ms: 2100,
+        })
+        .await
+        .unwrap();
+        let message = tokio::time::timeout(Duration::from_secs(1), rx_ws.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let (aggregate, positions) = paper_performance(&pool).await.unwrap();
+        assert_eq!(aggregate.total_positions, 1);
+        assert_eq!(aggregate.open_positions, 0);
+        assert_eq!(aggregate.closed_positions, 1);
+        assert_eq!(aggregate.winning_positions, 1);
+        assert_eq!(aggregate.realized_pnl, 23.0);
+        assert_eq!(aggregate.unrealized_pnl, 0.0);
+        assert_eq!(aggregate.total_pnl, 23.0);
+        assert_eq!(aggregate.total_costs, 1.25);
+        assert_eq!(positions[0].instrument, "WETH/TOKEN");
+        assert_eq!(positions[0].closed_at, Some(2000));
+        assert_eq!(positions[0].reason.as_deref(), Some("target"));
+        match serde_json::from_str::<WsBroadcast>(&message).unwrap() {
+            WsBroadcast::PaperPerformanceUpdate { data } => {
+                assert_eq!(data["aggregate"]["total_pnl"], 23.0);
+                assert_eq!(data["positions"][0]["id"], "paper-1");
+            }
+            _ => panic!("broadcast bukan PaperPerformanceUpdate"),
+        }
+
+        drop(tx);
+        handle.await.unwrap();
+        pool.close().await;
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn paper_position_valued_mempertahankan_open_dan_menghitung_unrealized_pnl() {
+        let (pool, path) = pool_temp("paper-valued").await;
+        let (tx, rx) = mpsc::channel(16);
+        let (tx_ws, mut rx_ws) = tokio::sync::broadcast::channel(16);
+        let handle = tokio::spawn(run_store(rx, pool.clone(), tx_ws));
+
+        tx.send(LogEntry {
+            kind: "paper_position_opened".into(),
+            payload: serde_json::json!({
+                "id": "sniper-0xpool", "strategy": "sniper", "pair": "WETH/TOKEN",
+                "token_amount": "42", "entry_cost_eth": "1.01", "costs": "0.01",
+                "opened_at_ms": 1000
+            })
+            .to_string(),
+            ts_ms: 1000,
+        })
+        .await
+        .unwrap();
+        let _ = rx_ws.recv().await.unwrap();
+
+        tx.send(LogEntry {
+            kind: "paper_position_valued".into(),
+            payload: serde_json::json!({
+                "id": "sniper-0xpool", "net_exit_eth": "1.20", "pnl": "0.19"
+            })
+            .to_string(),
+            ts_ms: 1500,
+        })
+        .await
+        .unwrap();
+        let message = rx_ws.recv().await.unwrap();
+        let (aggregate, positions) = paper_performance(&pool).await.unwrap();
+        assert_eq!(aggregate.open_positions, 1);
+        assert_eq!(aggregate.closed_positions, 0);
+        assert_eq!(aggregate.realized_pnl, 0.0);
+        assert_eq!(aggregate.unrealized_pnl, 0.19);
+        assert_eq!(aggregate.total_costs, 0.01);
+        assert_eq!(positions[0].status, "open");
+        assert_eq!(positions[0].closed_at, None);
+        assert_eq!(positions[0].exit_value, Some(1.2));
+        assert_eq!(positions[0].pnl, Some(0.19));
+        assert_eq!(positions[0].updated_at, 1500);
+        assert!(matches!(
+            serde_json::from_str::<WsBroadcast>(&message).unwrap(),
+            WsBroadcast::PaperPerformanceUpdate { .. }
+        ));
+
+        drop(tx);
+        handle.await.unwrap();
+        pool.close().await;
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn malformed_paper_close_does_not_close_or_broadcast() {
+        let (pool, path) = pool_temp("paper-malformed-close").await;
+        let (tx, rx) = mpsc::channel(16);
+        let (tx_ws, mut rx_ws) = tokio::sync::broadcast::channel(16);
+        let handle = tokio::spawn(run_store(rx, pool.clone(), tx_ws));
+
+        tx.send(LogEntry {
+            kind: "paper_position_opened".into(),
+            payload: serde_json::json!({
+                "id": "paper-open", "strategy": "sniper", "pool": "0xpool",
+                "entry_value": "1.01", "costs": "0.01"
+            })
+            .to_string(),
+            ts_ms: 1000,
+        })
+        .await
+        .unwrap();
+        let _ = rx_ws.recv().await.unwrap();
+        tx.send(LogEntry {
+            kind: "paper_position_closed".into(),
+            payload: serde_json::json!({"id": "paper-open", "reason": "missing valuation"})
+                .to_string(),
+            ts_ms: 2000,
+        })
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), rx_ws.recv())
+                .await
+                .is_err()
+        );
+        let (aggregate, positions) = paper_performance(&pool).await.unwrap();
+        assert_eq!(aggregate.open_positions, 1);
+        assert_eq!(aggregate.closed_positions, 0);
+        assert_eq!(positions[0].status, "open");
+        assert_eq!(positions[0].closed_at, None);
+
+        drop(tx);
+        handle.await.unwrap();
+        pool.close().await;
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn paper_position_payload_tidak_valid_dilewati_tanpa_broadcast() {
+        let (pool, path) = pool_temp("paper-invalid").await;
+        let (tx, rx) = mpsc::channel(16);
+        let (tx_ws, mut rx_ws) = tokio::sync::broadcast::channel::<String>(16);
+        let handle = tokio::spawn(run_store(rx, pool.clone(), tx_ws));
+        tx.send(LogEntry {
+            kind: "paper_position_opened".into(),
+            payload: serde_json::json!({"strategy": "sniper", "pair": "WETH/TOKEN"}).to_string(),
+            ts_ms: 1,
+        })
+        .await
+        .unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), rx_ws.recv())
+                .await
+                .is_err()
+        );
+        drop(tx);
+        handle.await.unwrap();
+
+        let (aggregate, positions) = paper_performance(&pool).await.unwrap();
+        assert_eq!(aggregate.total_positions, 0);
+        assert!(positions.is_empty());
+        pool.close().await;
         bersihkan(&path);
     }
 

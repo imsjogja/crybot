@@ -7,6 +7,7 @@
 //! - GET  /api/trades     -> riwayat swap/error Base dari SQLite
 //! - GET  /api/signals    -> sinyal multi-faktor terbaru (§5/§12)
 //! - GET  /api/risk       -> keputusan risk engine terbaru (§7/§12)
+//! - GET  /api/paper-performance -> hasil posisi model paper
 //! - POST /api/stop       -> graceful shutdown
 //! - POST /api/resume     -> clear halt flag
 //!
@@ -37,7 +38,7 @@ use crate::config::{Mode, StrategiesCfg};
 use crate::events::{MonitorMsg, WsBroadcast};
 use crate::metrics::SharedMetrics;
 use crate::risk::{HaltFlag, SharedRiskEngine};
-use crate::store::recent_decisions;
+use crate::store::{paper_performance_json, recent_decisions};
 
 const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 
@@ -351,6 +352,17 @@ async fn build_decisions_json(pool: &SqlitePool) -> Value {
     decision_rows_json(recent_decisions(pool, 100).await.unwrap_or_default())
 }
 
+async fn api_paper_performance(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    Json(paper_performance_json(&st.pool).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "gagal query paper performance");
+        json!({"aggregate": {}, "positions": []})
+    }))
+    .into_response()
+}
+
 async fn api_risk(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
@@ -440,6 +452,10 @@ async fn ws_status(socket: WebSocket, st: Shared) {
     let signals = build_signals_json(&st.pool).await;
     let decisions = build_decisions_json(&st.pool).await;
     let strategies = build_strategies_json(&st.strategies);
+    let paper_performance = paper_performance_json(&st.pool).await.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "gagal query paper performance untuk WS init");
+        json!({"aggregate": {}, "positions": []})
+    });
 
     let init = WsBroadcast::Init {
         status,
@@ -447,6 +463,7 @@ async fn ws_status(socket: WebSocket, st: Shared) {
         signals,
         decisions,
         strategies,
+        paper_performance,
     };
     let init_json = match serde_json::to_string(&init) {
         Ok(j) => j,
@@ -525,6 +542,7 @@ pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Re
         .route("/api/trades", get(api_trades))
         .route("/api/signals", get(api_signals))
         .route("/api/decisions", get(api_decisions))
+        .route("/api/paper-performance", get(api_paper_performance))
         .route("/api/risk", get(api_risk))
         .route("/api/stop", post(api_stop))
         .route("/api/halt", post(api_halt))

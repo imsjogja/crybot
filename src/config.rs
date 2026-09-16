@@ -380,6 +380,8 @@ pub struct SniperCfg {
     pub auto_sl_pct: Decimal,
     #[serde(default)]
     pub safety: SafetyCfg,
+    #[serde(default)]
+    pub paper_simulation: PaperSimulationCfg,
 }
 
 impl Default for SniperCfg {
@@ -392,8 +394,44 @@ impl Default for SniperCfg {
             auto_tp_pct: Decimal::from(50),
             auto_sl_pct: Decimal::from(20),
             safety: SafetyCfg::default(),
+            paper_simulation: PaperSimulationCfg::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PaperSimulationCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_paper_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+    #[serde(default = "default_amm_fee_bps")]
+    pub amm_fee_bps: u32,
+    #[serde(default = "default_entry_exit_gas_eth")]
+    pub entry_exit_gas_eth: Decimal,
+}
+
+impl Default for PaperSimulationCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_ms: default_paper_poll_interval_ms(),
+            amm_fee_bps: default_amm_fee_bps(),
+            entry_exit_gas_eth: default_entry_exit_gas_eth(),
+        }
+    }
+}
+
+fn default_paper_poll_interval_ms() -> u64 {
+    5_000
+}
+
+fn default_amm_fee_bps() -> u32 {
+    30
+}
+
+fn default_entry_exit_gas_eth() -> Decimal {
+    Decimal::new(1, 4)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -661,5 +699,17 @@ mod tests {
         assert_eq!(initial_log_lookback_range(100, 1), Some((100, 100)));
         assert_eq!(initial_log_lookback_range(2, 5), Some((0, 2)));
         assert_eq!(initial_log_lookback_range(100, 0), None);
+    }
+
+    #[test]
+    fn sniper_paper_simulation_defaults_to_disabled() {
+        let cfg = super::SniperCfg::default();
+        assert!(!cfg.paper_simulation.enabled);
+        assert_eq!(cfg.paper_simulation.poll_interval_ms, 5_000);
+        assert_eq!(cfg.paper_simulation.amm_fee_bps, 30);
+        assert_eq!(
+            cfg.paper_simulation.entry_exit_gas_eth,
+            rust_decimal::Decimal::new(1, 4)
+        );
     }
 }
