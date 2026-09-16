@@ -1,12 +1,12 @@
 //! Perintah Telegram interaktif (monitoring & kontrol).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 
 use crate::config::Mode;
 use crate::events::MonitorMsg;
 use crate::metrics::SharedMetrics;
-use crate::monitor::telegram::TelegramAlerter;
+use crate::monitor::telegram::{deskripsi_error_reqwest, TelegramAlerter};
 use crate::risk::SharedRiskEngine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -173,8 +173,17 @@ pub async fn run_command_listener(
         return;
     };
 
-    let client = reqwest::Client::new();
+    // Long-poll getUpdates memakai timeout=30 di sisi Telegram; timeout HTTP
+    // client diberi grace 10 detik di atasnya.
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(40))
+        .build()
+        .expect("client getUpdates harus dapat dibuat");
     let mut offset: i64 = 0;
+    // Backoff eksponensial (maks 60s) untuk SEMUA jalur gagal — respons tanpa
+    // field `result` (token invalid 401, conflict 409 poller kedua) sebelumnya
+    // langsung `continue` tanpa jeda = busy-loop menghammer api.telegram.org.
+    let mut backoff = Duration::from_secs(5);
     tracing::info!("listener perintah Telegram aktif (chat {auth_chat_id})");
 
     alerter
@@ -188,24 +197,46 @@ pub async fn run_command_listener(
         let url =
             format!("https://api.telegram.org/bot{token}/getUpdates?offset={offset}&timeout=30");
         let updates: serde_json::Value = match client.get(&url).send().await {
-            Ok(r) => match r.json().await {
-                Ok(v) => v,
+            Ok(response) if response.status().is_success() => match response.json().await {
+                Ok(value) => value,
                 Err(e) => {
-                    tracing::error!(error = %e, "getUpdates JSON invalid");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    tracing::error!(error = %deskripsi_error_reqwest(&e), backoff_s = backoff.as_secs(), "getUpdates JSON tidak valid");
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_secs(60));
                     continue;
                 }
             },
+            Ok(response) => {
+                tracing::error!(status = %response.status(), backoff_s = backoff.as_secs(), "getUpdates status gagal");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
+                continue;
+            }
             Err(e) => {
-                tracing::error!(error = %e, "getUpdates gagal");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                tracing::error!(error = %deskripsi_error_reqwest(&e), backoff_s = backoff.as_secs(), "getUpdates gagal");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(60));
                 continue;
             }
         };
 
-        let Some(list) = updates.get("result").and_then(serde_json::Value::as_array) else {
+        let Some(list) = (updates.get("ok").and_then(serde_json::Value::as_bool) == Some(true))
+            .then_some(())
+            .and_then(|_| updates.get("result").and_then(serde_json::Value::as_array))
+        else {
+            let error_code = updates
+                .get("error_code")
+                .and_then(serde_json::Value::as_i64);
+            tracing::error!(
+                ?error_code,
+                backoff_s = backoff.as_secs(),
+                "getUpdates respons tidak valid atau ditolak"
+            );
+            tokio::time::sleep(backoff).await;
+            backoff = (backoff * 2).min(Duration::from_secs(60));
             continue;
         };
+        backoff = Duration::from_secs(5);
         for upd in list {
             if let Some(id) = upd.get("update_id").and_then(serde_json::Value::as_i64) {
                 offset = id + 1;

@@ -2,5 +2,6 @@
 target
 data
 .env
+config/production.yaml
 *.md
 !README.md

@@ -60,24 +60,37 @@ impl Strategy for SniperStrategy {
         };
 
         let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
+        let pair = format!("{token0}/{token1}");
         if !self.pool_is_new(*pool) {
             tracing::debug!(pool = %pool, "pool baru duplikat diabaikan");
-            ctx.log("sniper_skip_duplicate", format!(r#"{{"pool":"{pool}"}}"#))
-                .await;
+            ctx.decision(
+                pair,
+                "skip_duplicate",
+                vec!["pool sudah pernah diproses".into()],
+                Some(serde_json::json!({"pool": pool.to_string()})),
+            )
+            .await;
             return;
         }
 
         if !self.cfg.enabled {
-            ctx.log("sniper_skip_disabled", format!(r#"{{"pool":"{pool}"}}"#))
-                .await;
+            ctx.decision(
+                pair,
+                "skip_disabled",
+                vec!["strategi sniper nonaktif".into()],
+                Some(serde_json::json!({"pool": pool.to_string()})),
+            )
+            .await;
             return;
         }
 
         if !factory_config_is_valid(&self.cfg.dex_factories) {
             tracing::warn!("allowlist factory sniper mengandung address tidak valid");
-            ctx.log(
-                "sniper_skip_invalid_factory_config",
-                format!(r#"{{"pool":"{pool}","dex":"{dex}"}}"#),
+            ctx.decision(
+                pair,
+                "skip_invalid_factory_config",
+                vec!["konfigurasi allowlist factory tidak valid".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "dex": dex})),
             )
             .await;
             ctx.alert(MonitorMsg::Warning(
@@ -88,18 +101,22 @@ impl Strategy for SniperStrategy {
         }
 
         if !factory_allowed(factory, &self.cfg.dex_factories) {
-            ctx.log(
-                "sniper_skip_factory",
-                format!(r#"{{"pool":"{pool}","dex":"{dex}"}}"#),
+            ctx.decision(
+                pair,
+                "skip_factory",
+                vec!["factory tidak ada dalam allowlist".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "factory": factory.to_string(), "dex": dex})),
             )
             .await;
             return;
         }
 
         if !is_weth_pair(token0, token1) {
-            ctx.log(
-                "sniper_skip_not_weth_pair",
-                format!(r#"{{"pool":"{pool}","token0":"{token0}","token1":"{token1}"}}"#),
+            ctx.decision(
+                pair,
+                "skip_non_weth_pair",
+                vec!["pair tidak memuat WETH Base".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "token0": token0.to_string(), "token1": token1.to_string()})),
             )
             .await;
             return;
@@ -107,12 +124,11 @@ impl Strategy for SniperStrategy {
 
         if self.cfg.max_buy_eth <= Decimal::ZERO || self.cfg.min_liquidity_eth <= Decimal::ZERO {
             tracing::warn!(max_buy = %self.cfg.max_buy_eth, min_liquidity = %self.cfg.min_liquidity_eth, "konfigurasi batas sniper tidak aman");
-            ctx.log(
-                "sniper_skip_invalid_limits",
-                format!(
-                    r#"{{"pool":"{pool}","max_buy_eth":"{}","min_liquidity_eth":"{}"}}"#,
-                    self.cfg.max_buy_eth, self.cfg.min_liquidity_eth
-                ),
+            ctx.decision(
+                pair,
+                "skip_invalid_limits",
+                vec!["max buy atau minimum likuiditas tidak positif".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "max_buy_eth": self.cfg.max_buy_eth.to_string(), "min_liquidity_eth": self.cfg.min_liquidity_eth.to_string()})),
             )
             .await;
             ctx.alert(MonitorMsg::Warning(format!(
@@ -122,14 +138,21 @@ impl Strategy for SniperStrategy {
             return;
         }
 
-        let pair = format!("{token0}/{token1}");
         tracing::info!(%pool, %pair, %dex, event_ts_ms = ts_ms, "kandidat sniper menunggu validasi RPC");
-        ctx.log(
-            "sniper_candidate_pending_rpc",
-            format!(
-                r#"{{"pool":"{pool}","token0":"{token0}","token1":"{token1}","dex":"{dex}","event_ts_ms":{ts_ms},"max_buy_eth":"{}","min_liquidity_eth":"{}","pending":"reserve,honeypot,ownership,lp_lock,holder_distribution"}}"#,
-                self.cfg.max_buy_eth, self.cfg.min_liquidity_eth
-            ),
+        ctx.decision(
+            pair.clone(),
+            "candidate_pending_rpc",
+            vec!["pool baru menunggu validasi reserve dan safety RPC".into()],
+            Some(serde_json::json!({
+                "pool": pool.to_string(),
+                "token0": token0.to_string(),
+                "token1": token1.to_string(),
+                "dex": dex,
+                "event_ts_ms": ts_ms,
+                "max_buy_eth": self.cfg.max_buy_eth.to_string(),
+                "min_liquidity_eth": self.cfg.min_liquidity_eth.to_string(),
+                "pending": ["reserve", "honeypot", "ownership", "lp_lock", "holder_distribution"],
+            })),
         )
         .await;
 
@@ -146,6 +169,16 @@ impl Strategy for SniperStrategy {
 
     async fn start(&mut self, state: &SharedState) {
         let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
+        ctx.decision(
+            "—",
+            "strategy_started",
+            vec![
+                "strategi sniper dimulai dalam mode observasi".into(),
+                "validasi RPC dan order live dinonaktifkan".into(),
+            ],
+            Some(startup_payload(&self.cfg)),
+        )
+        .await;
         ctx.log(
             "sniper_started",
             "validasi RPC dan order live dinonaktifkan".into(),
@@ -154,6 +187,24 @@ impl Strategy for SniperStrategy {
     }
 }
 
+fn startup_payload(cfg: &SniperCfg) -> serde_json::Value {
+    serde_json::json!({
+        "enabled": cfg.enabled,
+        "factory_count": cfg.dex_factories.len(),
+        "dex_factories": cfg.dex_factories.iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "max_buy_eth": cfg.max_buy_eth.to_string(),
+        "min_liquidity_eth": cfg.min_liquidity_eth.to_string(),
+        "auto_tp_pct": cfg.auto_tp_pct.to_string(),
+        "auto_sl_pct": cfg.auto_sl_pct.to_string(),
+        "safety": {
+            "check_honeypot": cfg.safety.check_honeypot,
+            "check_ownership_renounced": cfg.safety.check_ownership_renounced,
+            "check_lp_locked": cfg.safety.check_lp_locked,
+            "check_holder_distribution": cfg.safety.check_holder_distribution,
+            "max_holder_pct": cfg.safety.max_holder_pct.to_string(),
+        },
+    })
+}
 
 /// Payload `signal_created` untuk kandidat sniper — disimpan store ke tabel
 /// `signals` (§12) dan ditampilkan dashboard via `/api/signals`.
@@ -193,16 +244,14 @@ mod tests {
     fn factory_allowlist_is_case_insensitive() {
         let factory_str = "0x1111111111111111111111111111111111111111";
         let factory_addr: Address = factory_str.parse().unwrap();
-        assert!(factory_allowed(
-            &factory_addr,
-            &[factory_addr]
-        ));
-        let other_addr: Address = "0x2222222222222222222222222222222222222222".parse().unwrap();
-        assert!(!factory_allowed(
-            &other_addr,
-            &[factory_addr]
-        ));
-        let third_addr: Address = "0x3333333333333333333333333333333333333333".parse().unwrap();
+        assert!(factory_allowed(&factory_addr, &[factory_addr]));
+        let other_addr: Address = "0x2222222222222222222222222222222222222222"
+            .parse()
+            .unwrap();
+        assert!(!factory_allowed(&other_addr, &[factory_addr]));
+        let third_addr: Address = "0x3333333333333333333333333333333333333333"
+            .parse()
+            .unwrap();
         assert!(factory_allowed(&third_addr, &[]));
         assert!(factory_config_is_valid(&[factory_addr]));
     }
@@ -210,8 +259,12 @@ mod tests {
     #[test]
     fn weth_pair_accepts_either_position() {
         let weth: Address = WETH_BASE.parse().unwrap();
-        let other: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
-        let other2: Address = "0x2222222222222222222222222222222222222222".parse().unwrap();
+        let other: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let other2: Address = "0x2222222222222222222222222222222222222222"
+            .parse()
+            .unwrap();
         assert!(is_weth_pair(&weth, &other));
         assert!(is_weth_pair(&other, &weth));
         assert!(!is_weth_pair(&other, &other2));
@@ -220,10 +273,31 @@ mod tests {
     #[test]
     fn pool_deduplication_uses_normalized_address() {
         let mut strategy = SniperStrategy::new(SniperCfg::default());
-        let addr1: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
-        let addr2: Address = "0x1111111111111111111111111111111111111111".parse().unwrap();
+        let addr1: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
+        let addr2: Address = "0x1111111111111111111111111111111111111111"
+            .parse()
+            .unwrap();
         assert!(strategy.pool_is_new(addr1));
         assert!(!strategy.pool_is_new(addr2));
+    }
+
+    #[test]
+    fn startup_payload_memuat_konfigurasi_observasi() {
+        let factory = Address::repeat_byte(0x11);
+        let cfg = SniperCfg {
+            enabled: true,
+            dex_factories: vec![factory],
+            ..SniperCfg::default()
+        };
+
+        let payload = startup_payload(&cfg);
+        assert_eq!(payload["enabled"], true);
+        assert_eq!(payload["factory_count"], 1);
+        assert_eq!(payload["dex_factories"][0], factory.to_string());
+        assert_eq!(payload["max_buy_eth"], "0.05");
+        assert_eq!(payload["safety"]["check_honeypot"], true);
     }
 
     #[test]

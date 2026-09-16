@@ -26,15 +26,18 @@ use axum::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
+use std::net::SocketAddr;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+use subtle::ConstantTimeEq;
 use tokio::sync::{broadcast, mpsc, watch};
 
 use crate::config::{Mode, StrategiesCfg};
 use crate::events::{MonitorMsg, WsBroadcast};
 use crate::metrics::SharedMetrics;
 use crate::risk::{HaltFlag, SharedRiskEngine};
+use crate::store::recent_decisions;
 
 const DASHBOARD_HTML: &str = include_str!("../assets/dashboard.html");
 
@@ -58,13 +61,18 @@ pub struct WebState {
 
 type Shared = Arc<WebState>;
 
+fn tokens_equal(expected: &str, actual: &str) -> bool {
+    expected.len() == actual.len() && expected.as_bytes().ct_eq(actual.as_bytes()).into()
+}
+
 fn authorized(st: &WebState, headers: &HeaderMap) -> bool {
     match &st.token {
         None => true,
-        Some(t) => headers
+        Some(expected) => headers
             .get("authorization")
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == format!("Bearer {t}"))
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(|actual| tokens_equal(expected, actual))
             .unwrap_or(false),
     }
 }
@@ -84,7 +92,10 @@ struct WsQuery {
 fn authorized_ws(st: &WebState, token: &Option<String>) -> bool {
     match &st.token {
         None => true,
-        Some(t) => token.as_ref().map(|q| q == t).unwrap_or(false),
+        Some(expected) => token
+            .as_deref()
+            .map(|actual| tokens_equal(expected, actual))
+            .unwrap_or(false),
     }
 }
 
@@ -109,6 +120,10 @@ fn build_status_json(st: &WebState) -> Value {
         "strategies": strategy_statuses(&st.strategies),
         "risk": st.risk.status_json(),
         "metrics": {
+            "new_heads_received": snap.new_heads_received,
+            "factory_logs_received": snap.factory_logs_received,
+            "pools_detected": snap.pools_detected,
+            "factory_unknown_logs": snap.factory_unknown_logs,
             "orders": snap.orders,
             "fills": snap.follower_fills,
             "errors": snap.exec_errors,
@@ -300,6 +315,42 @@ async fn api_signals(State(st): State<Shared>, headers: HeaderMap) -> impl IntoR
     Json(build_signals_json(&st.pool).await).into_response()
 }
 
+fn decision_rows_json(rows: Vec<crate::store::DecisionRow>) -> Value {
+    let decisions: Vec<Value> = rows
+        .into_iter()
+        .map(|row| {
+            let reasons = serde_json::from_str::<Value>(&row.reasons)
+                .unwrap_or_else(|_| json!(["alasan keputusan tersimpan dalam format lama"]));
+            let data = row
+                .data
+                .and_then(|data| serde_json::from_str::<Value>(&data).ok());
+            json!({
+                "ts_ms": row.ts_ms,
+                "strategy": row.strategy,
+                "pair": row.pair,
+                "decision": row.decision,
+                "reasons": reasons,
+                "data": data,
+            })
+        })
+        .collect();
+    json!({"decisions": decisions})
+}
+
+async fn api_decisions(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
+    if !authorized(&st, &headers) {
+        return unauthorized().into_response();
+    }
+    Json(decision_rows_json(
+        recent_decisions(&st.pool, 100).await.unwrap_or_default(),
+    ))
+    .into_response()
+}
+
+async fn build_decisions_json(pool: &SqlitePool) -> Value {
+    decision_rows_json(recent_decisions(pool, 100).await.unwrap_or_default())
+}
+
 async fn api_risk(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
@@ -387,12 +438,14 @@ async fn ws_status(socket: WebSocket, st: Shared) {
     let status = build_status_json(&st);
     let trades = build_trades_json(&st.pool).await;
     let signals = build_signals_json(&st.pool).await;
+    let decisions = build_decisions_json(&st.pool).await;
     let strategies = build_strategies_json(&st.strategies);
 
     let init = WsBroadcast::Init {
         status,
         trades,
         signals,
+        decisions,
         strategies,
     };
     let init_json = match serde_json::to_string(&init) {
@@ -452,6 +505,18 @@ async fn ws(
 }
 
 pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Receiver<bool>) {
+    let bind_addr: SocketAddr = match bind.parse() {
+        Ok(addr) => addr,
+        Err(e) => {
+            tracing::error!(error = %e, bind = %bind, "alamat bind dashboard tidak valid — nonaktif");
+            return;
+        }
+    };
+    if !bind_addr.ip().is_loopback() && state.token.is_none() {
+        tracing::error!(bind = %bind, "menolak dashboard non-loopback tanpa DASHBOARD_TOKEN");
+        return;
+    }
+
     let app = Router::new()
         .route("/", get(dashboard))
         .route("/api/status", get(api_status))
@@ -459,6 +524,7 @@ pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Re
         .route("/api/positions", get(api_positions))
         .route("/api/trades", get(api_trades))
         .route("/api/signals", get(api_signals))
+        .route("/api/decisions", get(api_decisions))
         .route("/api/risk", get(api_risk))
         .route("/api/stop", post(api_stop))
         .route("/api/halt", post(api_halt))

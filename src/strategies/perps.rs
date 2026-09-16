@@ -76,7 +76,12 @@ impl Strategy for PerpsStrategy {
     }
 
     async fn on_event(&mut self, event: &StrategyEvent, state: &SharedState) {
-        let StrategyEvent::PriceTick { pair, price, ts_ms: _ } = event else {
+        let StrategyEvent::PriceTick {
+            pair,
+            price,
+            ts_ms: _,
+        } = event
+        else {
             return;
         };
 

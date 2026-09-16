@@ -121,24 +121,16 @@ impl ArbitrageStrategy {
             return;
         }
 
-        self.reserves.insert(pool_address, Reserves { reserve0, reserve1 });
-        let Some(changed_reserves) = self
-            .reserves
-            .get(&changed_pool.address)
-            .copied()
-        else {
+        self.reserves
+            .insert(pool_address, Reserves { reserve0, reserve1 });
+        let Some(changed_reserves) = self.reserves.get(&changed_pool.address).copied() else {
             return;
         };
 
         for other_pool in self.cfg.monitored_pools.iter().filter(|other| {
-            other.address != changed_pool.address
-                && Self::same_token_pair(&changed_pool, other)
+            other.address != changed_pool.address && Self::same_token_pair(&changed_pool, other)
         }) {
-            let Some(other_reserves) = self
-                .reserves
-                .get(&other_pool.address)
-                .copied()
-            else {
+            let Some(other_reserves) = self.reserves.get(&other_pool.address).copied() else {
                 continue;
             };
             let Some(changed_price) =
@@ -205,7 +197,8 @@ impl Strategy for ArbitrageStrategy {
             ..
         } = event
         {
-            self.handle_pool_sync(*pool, reserve0, reserve1, state).await;
+            self.handle_pool_sync(*pool, reserve0, reserve1, state)
+                .await;
         }
     }
 
@@ -248,15 +241,59 @@ mod tests {
 
     #[test]
     fn pairs_match_with_reversed_token_order() {
-        let left = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
-        let right = pool("0x0000000000000000000000000000000000000004".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), 30);
+        let left = pool(
+            "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000003"
+                .parse()
+                .unwrap(),
+            30,
+        );
+        let right = pool(
+            "0x0000000000000000000000000000000000000004"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000003"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            30,
+        );
         assert!(ArbitrageStrategy::same_token_pair(&left, &right));
     }
 
     #[test]
     fn profit_requires_positive_spread_after_fees() {
-        let buy = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
-        let sell = pool("0x0000000000000000000000000000000000000004".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), 30);
+        let buy = pool(
+            "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000003"
+                .parse()
+                .unwrap(),
+            30,
+        );
+        let sell = pool(
+            "0x0000000000000000000000000000000000000004"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000003"
+                .parse()
+                .unwrap(),
+            30,
+        );
         assert_eq!(
             ArbitrageStrategy::estimated_profit(
                 &buy,
@@ -277,13 +314,30 @@ mod tests {
 
     #[test]
     fn normalizes_reversed_pool_price() {
-        let reversed = pool("0x0000000000000000000000000000000000000001".parse().unwrap(), "0x0000000000000000000000000000000000000003".parse().unwrap(), "0x0000000000000000000000000000000000000002".parse().unwrap(), 30);
+        let reversed = pool(
+            "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000003"
+                .parse()
+                .unwrap(),
+            "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
+            30,
+        );
         let reserves = Reserves {
             reserve0: U256::from(2_000u64),
             reserve1: U256::from(1u64),
         };
         assert_eq!(
-            ArbitrageStrategy::normalized_price(&reversed, reserves, &"0x0000000000000000000000000000000000000002".parse().unwrap()),
+            ArbitrageStrategy::normalized_price(
+                &reversed,
+                reserves,
+                &"0x0000000000000000000000000000000000000002"
+                    .parse()
+                    .unwrap()
+            ),
             Some(Decimal::from(2_000))
         );
     }

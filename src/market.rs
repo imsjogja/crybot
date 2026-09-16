@@ -10,10 +10,10 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
+use alloy::primitives::Address;
 use alloy::primitives::U256;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
-use alloy::primitives::Address;
 
 /// Default maksimum umur state sebelum dianggap stale (ms).
 /// Blueprint §15: "MarketState freshness + stale rejection".
@@ -185,14 +185,21 @@ impl MarketState {
     }
 
     /// Upsert pool dari NewPool (factory event).
-    pub fn on_new_pool(&mut self, pool: Address, token0: Address, token1: Address, dex: &str, ts_ms: i64) {
+    pub fn on_new_pool(
+        &mut self,
+        pool: Address,
+        token0: Address,
+        token1: Address,
+        dex: &str,
+        ts_ms: i64,
+    ) {
         self.pools
             .entry(pool)
             .and_modify(|p| p.last_update_ms = ts_ms)
             .or_insert_with(|| PoolState {
-                pool: pool,
-                token0: token0,
-                token1: token1,
+                pool,
+                token0,
+                token1,
                 dex: dex.to_string(),
                 reserve0: U256::ZERO,
                 reserve1: U256::ZERO,
@@ -315,9 +322,22 @@ mod tests {
     #[test]
     fn sync_menghitung_harga() {
         let mut m = MarketState::default();
-        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 1000);
-        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(2000u64), U256::from(1000u64), 2000);
-        let p = m.pool(Address::repeat_byte(0x11)).expect("pool ada (case-insensitive)");
+        m.on_new_pool(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0xaa),
+            Address::repeat_byte(0xbb),
+            "aerodrome",
+            1000,
+        );
+        m.on_pool_sync(
+            Address::repeat_byte(0x11),
+            U256::from(2000u64),
+            U256::from(1000u64),
+            2000,
+        );
+        let p = m
+            .pool(Address::repeat_byte(0x11))
+            .expect("pool ada (case-insensitive)");
         assert_eq!(p.price, Decimal::from(2));
         assert_eq!(p.last_update_ms, 2000);
     }
@@ -325,13 +345,34 @@ mod tests {
     #[test]
     fn price_change_dan_flow_window_bekerja() {
         let mut m = MarketState::default();
-        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 0);
+        m.on_new_pool(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0xaa),
+            Address::repeat_byte(0xbb),
+            "aerodrome",
+            0,
+        );
         // Sync awal membentuk baseline (tidak ada flow karena reserve sebelumnya nol).
-        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1000u64), U256::from(1000u64), 1_000);
+        m.on_pool_sync(
+            Address::repeat_byte(0x11),
+            U256::from(1000u64),
+            U256::from(1000u64),
+            1_000,
+        );
         // Buy token1: reserve0 naik, reserve1 turun pada t=301s.
-        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1200u64), U256::from(600u64), 301_000);
+        m.on_pool_sync(
+            Address::repeat_byte(0x11),
+            U256::from(1200u64),
+            U256::from(600u64),
+            301_000,
+        );
         // Sell token1: reserve0 turun, reserve1 naik pada t=302s.
-        m.on_pool_sync(Address::repeat_byte(0x11), U256::from(1100u64), U256::from(700u64), 302_000);
+        m.on_pool_sync(
+            Address::repeat_byte(0x11),
+            U256::from(1100u64),
+            U256::from(700u64),
+            302_000,
+        );
 
         let p = m.pool(Address::repeat_byte(0x11)).unwrap();
         // Harga baseline 1.0 (t=1s) -> 1.5714 (t=302s) dalam window 5 menit.
@@ -348,7 +389,13 @@ mod tests {
     #[test]
     fn whale_netflow_menjumlah_trade_besar() {
         let mut m = MarketState::default();
-        m.on_new_pool(Address::repeat_byte(0x11), Address::repeat_byte(0xaa), Address::repeat_byte(0xbb), "aerodrome", 0);
+        m.on_new_pool(
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0xaa),
+            Address::repeat_byte(0xbb),
+            "aerodrome",
+            0,
+        );
         let whale = U256::from_str_radix("1000000000000000000", 10).unwrap(); // 1e18
         m.on_pool_sync(Address::repeat_byte(0x11), whale, whale, 1_000);
         // Whale buy: reserve0 naik 2e18.

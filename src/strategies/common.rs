@@ -4,7 +4,7 @@ use alloy::primitives::{Address, U256};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
 
-use crate::events::{LogEntry, MonitorMsg, StrategySource};
+use crate::events::{LogEntry, MonitorMsg, StrategyDecision, StrategySource};
 
 pub const MAX_RETRIES: u32 = 3;
 pub const DEFAULT_SLIPPAGE_BPS: u32 = 300;
@@ -43,6 +43,30 @@ impl StrategyContext {
                 "channel log ditutup — log hilang"
             );
         }
+    }
+
+    /// Catat keputusan strategi lewat channel store tanpa I/O SQLite di hot path.
+    pub async fn decision(
+        &self,
+        pair: impl Into<String>,
+        decision: impl Into<String>,
+        reasons: Vec<String>,
+        data: Option<serde_json::Value>,
+    ) {
+        let payload = match serde_json::to_string(&StrategyDecision {
+            strategy: self.strategy_name.to_string(),
+            pair: pair.into(),
+            decision: decision.into(),
+            reasons,
+            data,
+        }) {
+            Ok(payload) => payload,
+            Err(e) => {
+                tracing::warn!(strategy = self.strategy_name, error = %e, "gagal serialisasi keputusan strategi");
+                return;
+            }
+        };
+        self.log("strategy_decision", payload).await;
     }
 
     /// Kirim alert ke monitor (Telegram).

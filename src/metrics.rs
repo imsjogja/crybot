@@ -25,6 +25,14 @@ pub struct Metrics {
     submit_ack_latency: Mutex<VecDeque<i64>>,
     pub master_fills: AtomicU64,
     pub signals: AtomicU64,
+    /// Semua header block baru yang diterima connector dari WSS atau HTTP.
+    pub new_heads_received: AtomicU64,
+    /// Semua raw log factory yang diterima sebelum didekode.
+    pub factory_logs_received: AtomicU64,
+    /// Event factory yang berhasil didekode menjadi `NewPool`.
+    pub pools_detected: AtomicU64,
+    /// Raw factory diagnostic logs yang topic0-nya bukan event factory dikenal.
+    pub factory_unknown_logs: AtomicU64,
     pub skips: AtomicU64,
     pub orders: AtomicU64,
     pub follower_fills: AtomicU64,
@@ -83,6 +91,10 @@ pub struct Snapshot {
     pub submit_p95: Option<i64>,
     pub master_fills: u64,
     pub signals: u64,
+    pub new_heads_received: u64,
+    pub factory_logs_received: u64,
+    pub pools_detected: u64,
+    pub factory_unknown_logs: u64,
     pub skips: u64,
     pub skip_rate_pct: f64,
     pub orders: u64,
@@ -140,6 +152,10 @@ impl Metrics {
             submit_p95: percentile(&self.submit_ack_latency, 0.95),
             master_fills: self.master_fills.load(Ordering::Relaxed),
             signals,
+            new_heads_received: self.new_heads_received.load(Ordering::Relaxed),
+            factory_logs_received: self.factory_logs_received.load(Ordering::Relaxed),
+            pools_detected: self.pools_detected.load(Ordering::Relaxed),
+            factory_unknown_logs: self.factory_unknown_logs.load(Ordering::Relaxed),
             skips,
             skip_rate_pct: if total > 0 {
                 skips as f64 / total as f64 * 100.0
@@ -163,7 +179,11 @@ impl std::fmt::Display for Snapshot {
         let fmt_ms = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("-".into());
         write!(
             f,
-            "METRIK BASE | orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} sign p95: {} submit p95: {}",
+            "METRIK BASE | new_heads_received={} factory_logs_received={} pools_detected={} factory_unknown_logs={} orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} sign p95: {} submit p95: {}",
+            self.new_heads_received,
+            self.factory_logs_received,
+            self.pools_detected,
+            self.factory_unknown_logs,
             self.orders,
             self.follower_fills,
             self.exec_errors,
@@ -247,6 +267,28 @@ mod tests {
         let s = Metrics::default().snapshot();
         assert_eq!(s.detect_p50, None);
         assert_eq!(s.skip_rate_pct, 0.0);
+        assert_eq!(s.new_heads_received, 0);
+        assert_eq!(s.factory_logs_received, 0);
+        assert_eq!(s.pools_detected, 0);
+        assert_eq!(s.factory_unknown_logs, 0);
         let _ = s.to_string(); // Display tidak panic tanpa sampel
+    }
+
+    #[test]
+    fn feed_counters_are_separate_from_decoded_pools() {
+        let m = Metrics::default();
+        m.inc(&m.new_heads_received);
+        m.inc(&m.factory_logs_received);
+        m.inc(&m.factory_logs_received);
+        m.inc(&m.pools_detected);
+        m.inc(&m.factory_unknown_logs);
+        let s = m.snapshot();
+        assert_eq!(s.new_heads_received, 1);
+        assert_eq!(s.factory_logs_received, 2);
+        assert_eq!(s.pools_detected, 1);
+        assert_eq!(s.factory_unknown_logs, 1);
+        assert_eq!(s.signals, 0);
+        assert!(s.to_string().contains("factory_logs_received=2"));
+        assert!(s.to_string().contains("factory_unknown_logs=1"));
     }
 }

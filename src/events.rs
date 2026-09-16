@@ -111,6 +111,20 @@ pub enum StrategyEvent {
     },
 }
 
+/// Keputusan strategi yang dikirim lewat `LogEntry { kind: "strategy_decision" }`.
+///
+/// Strategi hanya mengirim payload ini ke channel log; task store yang melakukan
+/// semua I/O SQLite dan broadcast setelah transaksi berhasil disimpan.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct StrategyDecision {
+    pub strategy: String,
+    pub pair: String,
+    pub decision: String,
+    pub reasons: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
 /// Event broadcast dari store/API ke semua WebSocket client.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -119,7 +133,17 @@ pub enum WsBroadcast {
         status: serde_json::Value,
         trades: serde_json::Value,
         signals: serde_json::Value,
+        decisions: serde_json::Value,
         strategies: serde_json::Value,
+    },
+    NewDecision {
+        ts_ms: i64,
+        strategy: String,
+        pair: String,
+        decision: String,
+        reasons: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<serde_json::Value>,
     },
     StatusUpdate {
         data: serde_json::Value,
@@ -132,9 +156,9 @@ pub enum WsBroadcast {
         score: i64,
         reasons: String,
     },
-    MarketScannerUpdate { 
-        data: serde_json::Value, 
-    }, 
+    MarketScannerUpdate {
+        data: serde_json::Value,
+    },
 
     NewTrade {
         ts_ms: i64,

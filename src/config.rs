@@ -215,6 +215,13 @@ pub struct BaseCfg {
     /// blueprint §4.3 freshness guard.
     #[serde(default = "default_stale_ms")]
     pub stale_ms: i64,
+    /// Jumlah block inklusif untuk memindai factory logs saat startup WSS.
+    /// Nol menonaktifkan pemindaian startup.
+    #[serde(default = "default_initial_log_lookback_blocks")]
+    pub initial_log_lookback_blocks: u64,
+    /// Jalankan diagnostik raw logs factory sekali setelah lookback startup WSS.
+    #[serde(default = "default_true")]
+    pub raw_factory_diagnostics: bool,
     /// Nama env var berisi private key (BUKAN key-nya langsung!).
     pub private_key_env: String,
     /// Alamat kontrak-kontrak penting Base (dengan default).
@@ -229,6 +236,10 @@ pub struct BaseAddresses {
     pub gas_oracle: Address,
     pub aerodrome_router: Address,
     pub aerodrome_pool_factory: Address,
+    /// Aerodrome Slipstream concentrated-liquidity factory. Field ini optional
+    /// saat deserialisasi agar konfigurasi lama tetap valid.
+    #[serde(default = "default_aerodrome_slipstream_factory")]
+    pub aerodrome_slipstream_factory: Address,
     pub aerodrome_slipstream_router: Address,
     pub aerodrome_nft_manager: Address,
     pub uniswap_v3_router: Address,
@@ -249,25 +260,64 @@ pub struct BaseAddresses {
 impl Default for BaseAddresses {
     fn default() -> Self {
         Self {
-            weth: "0x4200000000000000000000000000000000000006".parse().unwrap(),
-            gas_oracle: "0x420000000000000000000000000000000000000F".parse().unwrap(),
-            aerodrome_router: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43".parse().unwrap(),
-            aerodrome_pool_factory: "0x420DD381b31aEf6683db6B902084cB0FFECe40Da".parse().unwrap(),
-            aerodrome_slipstream_router: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5".parse().unwrap(),
-            aerodrome_nft_manager: "0x827922686190790b37229fd06084350e74485b72".parse().unwrap(),
-            uniswap_v3_router: "0x2626664c2603336E57B271c5C0b26F421741e481".parse().unwrap(),
-            uniswap_v2_factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6".parse().unwrap(),
-            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31f984".parse().unwrap(),
-            uniswap_v3_nft_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88".parse().unwrap(),
-            baseswap_router: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86".parse().unwrap(),
-            baseswap_factory: "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB".parse().unwrap(),
-            sushiswap_router: "0xFB7eF6660F5950E02F0F6daCf63e9465d4d449b9".parse().unwrap(),
-            pancakeswap_v3_router: "0x678aa4bf4e210cf2166753e054d5b7c31cc7fa86".parse().unwrap(),
-            aero_token: "0x940181a94A35A4569E4529A3CDfB74e38FD98631".parse().unwrap(),
-            ve_aero: "0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4".parse().unwrap(),
-            voter: "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5".parse().unwrap(),
-            minter: "0xeB018363F0a9Af8f91F06FEe6613a751b2A33FE5".parse().unwrap(),
-            aave_v3_pool: "0xA238dD80c259a72e81D7e4664a9801593F98d1C5".parse().unwrap(),
+            weth: "0x4200000000000000000000000000000000000006"
+                .parse()
+                .unwrap(),
+            gas_oracle: "0x420000000000000000000000000000000000000F"
+                .parse()
+                .unwrap(),
+            aerodrome_router: "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43"
+                .parse()
+                .unwrap(),
+            aerodrome_pool_factory: "0x420DD381b31aEf6683db6B902084cB0FFECe40Da"
+                .parse()
+                .unwrap(),
+            aerodrome_slipstream_factory: default_aerodrome_slipstream_factory(),
+            aerodrome_slipstream_router: "0xBE6D8f0d05cC4be24d5167a3eF062215bE6D18a5"
+                .parse()
+                .unwrap(),
+            aerodrome_nft_manager: "0x827922686190790b37229fd06084350e74485b72"
+                .parse()
+                .unwrap(),
+            uniswap_v3_router: "0x2626664c2603336E57B271c5C0b26F421741e481"
+                .parse()
+                .unwrap(),
+            uniswap_v2_factory: "0x8909Dc15e40173Ff4699343b6eB8132c65e18eC6"
+                .parse()
+                .unwrap(),
+            uniswap_v3_factory: "0x1F98431c8aD98523631AE4a59f267346ea31f984"
+                .parse()
+                .unwrap(),
+            uniswap_v3_nft_manager: "0xC36442b4a4522E871399CD717aBDD847Ab11FE88"
+                .parse()
+                .unwrap(),
+            baseswap_router: "0x327Df1E6de05895d2ab08513aaDD9313Fe505d86"
+                .parse()
+                .unwrap(),
+            baseswap_factory: "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB"
+                .parse()
+                .unwrap(),
+            sushiswap_router: "0xFB7eF6660F5950E02F0F6daCf63e9465d4d449b9"
+                .parse()
+                .unwrap(),
+            pancakeswap_v3_router: "0x678aa4bf4e210cf2166753e054d5b7c31cc7fa86"
+                .parse()
+                .unwrap(),
+            aero_token: "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+                .parse()
+                .unwrap(),
+            ve_aero: "0xeBf418Fe2512e7E6bd9b87a8F0f294aCDC67e6B4"
+                .parse()
+                .unwrap(),
+            voter: "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5"
+                .parse()
+                .unwrap(),
+            minter: "0xeB018363F0a9Af8f91F06FEe6613a751b2A33FE5"
+                .parse()
+                .unwrap(),
+            aave_v3_pool: "0xA238dD80c259a72e81D7e4664a9801593F98d1C5"
+                .parse()
+                .unwrap(),
         }
     }
 }
@@ -276,12 +326,26 @@ fn default_true() -> bool {
     true
 }
 
+fn default_aerodrome_slipstream_factory() -> Address {
+    "0xeC8E5342B19977B4eF8892e02D71DAc57b191583"
+        .parse()
+        .expect("Aerodrome Slipstream factory address is valid")
+}
+
 fn default_poll_interval_ms() -> u64 {
     1_000
 }
 
 fn default_stale_ms() -> i64 {
     crate::market::DEFAULT_STALE_MS
+}
+
+fn default_initial_log_lookback_blocks() -> u64 {
+    500
+}
+
+pub(crate) fn initial_log_lookback_range(current: u64, lookback: u64) -> Option<(u64, u64)> {
+    (lookback > 0).then(|| (current.saturating_sub(lookback.saturating_sub(1)), current))
 }
 
 // ============================================================================
@@ -566,4 +630,36 @@ pub struct PerpsPositionCfg {
     pub stop_loss: Option<Decimal>,
     #[serde(default)]
     pub take_profit: Option<Decimal>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{initial_log_lookback_range, BaseAddresses, BaseCfg};
+
+    #[test]
+    fn base_config_defaults_raw_factory_diagnostics_to_true() {
+        let cfg: BaseCfg = serde_yaml::from_str(
+            "ws_url: wss://example.test\nhttp_url: https://example.test\nmev_rpc_url: null\nprivate_key_env: BASE_PRIVATE_KEY\n",
+        )
+        .unwrap();
+        assert!(cfg.raw_factory_diagnostics);
+    }
+
+    #[test]
+    fn default_baseswap_factory_is_expected_address() {
+        assert_eq!(
+            BaseAddresses::default().baseswap_factory,
+            "0xFDa619b6d20975be80A10332cD39b9a4b0FAa8BB"
+                .parse::<alloy::primitives::Address>()
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn initial_log_lookback_range_is_inclusive_and_bounded() {
+        assert_eq!(initial_log_lookback_range(100, 5), Some((96, 100)));
+        assert_eq!(initial_log_lookback_range(100, 1), Some((100, 100)));
+        assert_eq!(initial_log_lookback_range(2, 5), Some((0, 2)));
+        assert_eq!(initial_log_lookback_range(100, 0), None);
+    }
 }

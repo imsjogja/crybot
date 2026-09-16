@@ -6,9 +6,30 @@
 //! - send_card() : HTML + tombol inline keyboard (status/kontrol — konten
 //!   sepenuhnya di bawah kendali bot, bukan input luar)
 
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 use crate::events::MonitorMsg;
+
+/// Timeout HTTP untuk semua request Telegram — koneksi hang tidak boleh
+/// memblokir pipeline alert (channel monitor penuh -> backpressure executor).
+const HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Deskripsi error reqwest TANPA URL. Display reqwest (`error = %e`)
+/// menyertakan URL lengkap yang mengandung token bot — jangan pernah dilog.
+pub(crate) fn deskripsi_error_reqwest(e: &reqwest::Error) -> String {
+    if let Some(status) = e.status() {
+        format!("HTTP {status}")
+    } else if e.is_timeout() {
+        "timeout".to_string()
+    } else if e.is_connect() {
+        "gagal koneksi".to_string()
+    } else if e.is_decode() {
+        "respons tidak valid".to_string()
+    } else {
+        "error request".to_string()
+    }
+}
 
 /// Tombol kontrol utama — callback_data diproses di monitor::commands.
 /// /halt = emergency stop (§13); /stop = shutdown penuh.
@@ -36,7 +57,10 @@ impl TelegramAlerter {
         Self {
             token,
             chat_id,
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(HTTP_TIMEOUT)
+                .build()
+                .expect("client Telegram harus dapat dibuat"),
             enabled,
         }
     }
@@ -66,7 +90,15 @@ impl TelegramAlerter {
             self.token
         );
         let body = serde_json::json!({"callback_query_id": callback_id, "text": text});
-        let _ = self.client.post(&url).json(&body).send().await;
+        match self.client.post(&url).json(&body).send().await {
+            Ok(response) if !response.status().is_success() => {
+                tracing::warn!(status = %response.status(), "gagal jawab callback Telegram");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %deskripsi_error_reqwest(&e), "gagal jawab callback Telegram");
+            }
+        }
     }
 
     async fn post_message(&self, text: &str, html: bool, keyboard: bool) {
@@ -96,8 +128,14 @@ impl TelegramAlerter {
                 .collect();
             body["reply_markup"] = serde_json::json!({"inline_keyboard": kb});
         }
-        if let Err(e) = self.client.post(&url).json(&body).send().await {
-            tracing::error!(error = %e, "gagal kirim alert telegram");
+        match self.client.post(&url).json(&body).send().await {
+            Ok(response) if !response.status().is_success() => {
+                tracing::error!(status = %response.status(), "gagal kirim alert Telegram");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::error!(error = %deskripsi_error_reqwest(&e), "gagal kirim alert Telegram");
+            }
         }
     }
 }

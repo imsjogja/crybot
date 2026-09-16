@@ -30,6 +30,22 @@ impl Simulator {
         Self { provider, from }
     }
 
+    /// True only for the expected pre-buy SELL-call failures caused by the
+    /// caller not yet owning or approving the purchased token. This is not a
+    /// state override: every other revert remains a blocking simulation error.
+    pub fn is_insufficient_funds_or_allowance(error: &str) -> bool {
+        let error = error.to_ascii_lowercase();
+        let insufficient = error.contains("insufficient balance")
+            || error.contains("transfer amount exceeds balance")
+            || error.contains("erc20: transfer amount exceeds balance")
+            || error.contains("balance too low");
+        let allowance = error.contains("insufficient allowance")
+            || error.contains("transfer amount exceeds allowance")
+            || error.contains("erc20insufficientallowance")
+            || error.contains("allowance too low");
+        insufficient || allowance
+    }
+
     /// Simulasikan satu transaksi via `eth_call` + `eth_estimateGas`.
     ///
     /// `Ok(SimulationResult)` selalu dikembalikan untuk keputusan bisnis;
@@ -67,5 +83,26 @@ impl Simulator {
         };
 
         SimulationResult::ok(gas, now_ms() - start)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Simulator;
+
+    #[test]
+    fn classifies_only_clear_balance_or_allowance_failures() {
+        assert!(Simulator::is_insufficient_funds_or_allowance(
+            "ERC20: transfer amount exceeds balance"
+        ));
+        assert!(Simulator::is_insufficient_funds_or_allowance(
+            "ERC20InsufficientAllowance"
+        ));
+        assert!(!Simulator::is_insufficient_funds_or_allowance(
+            "execution reverted: transfer blocked"
+        ));
+        assert!(!Simulator::is_insufficient_funds_or_allowance(
+            "execution reverted"
+        ));
     }
 }

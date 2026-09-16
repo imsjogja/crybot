@@ -20,5 +20,11 @@ crybot.dna-server.cloud {
 			roll_size 10MB
 			roll_keep 10
 		}
+		format filter {
+			wrap json
+			fields {
+				request>uri delete
+			}
+		}
 	}
 }

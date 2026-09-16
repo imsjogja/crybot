@@ -24,6 +24,8 @@ use tokio::sync::mpsc;
 
 use crate::config::{AppConfig, StrategiesCfg};
 use crate::events::{now_ms, LogEntry, MonitorMsg, StrategyEvent};
+
+use self::common::StrategyContext;
 use crate::market::SharedMarketState;
 use crate::metrics::SharedMetrics;
 
@@ -159,7 +161,11 @@ impl StrategyEngine {
                 // Scope eksplisit: guard write HARUS dilepas sebelum await
                 // (RwLockWriteGuard tidak Send).
                 let snapshot = {
-                    let mut m = self.shared.market.write().expect("market lock poisoned");
+                    let mut m = self
+                        .shared
+                        .market
+                        .write()
+                        .unwrap_or_else(|e| e.into_inner());
                     m.on_pool_sync(*pool, r0, r1, *ts_ms);
                     m.pool(*pool).cloned()
                 };
@@ -170,8 +176,31 @@ impl StrategyEngine {
                 if let Some(pool_state) = snapshot {
                     let last = last_signal.get(&pool_state.pool).copied().unwrap_or(0);
                     if now_ms().saturating_sub(last) >= SIGNAL_COOLDOWN_MS {
-                        if let Some(candidate) = score::evaluate_candidate(&pool_state) {
-                            last_signal.insert(pool_state.pool, now_ms());
+                        let score_ts_ms = now_ms();
+                        let (score, factors, reasons) = score::score_pool(&pool_state, score_ts_ms);
+                        let pair = format!("{}/{}", pool_state.token0, pool_state.token1);
+                        let ctx = StrategyContext::new(
+                            "market_score",
+                            crate::events::StrategySource::Sniper,
+                            &self.shared,
+                        );
+                        last_signal.insert(pool_state.pool, score_ts_ms);
+                        if score < score::MIN_CANDIDATE_SCORE {
+                            ctx.decision(
+                                pair,
+                                "score_below_threshold",
+                                reasons,
+                                Some(serde_json::json!({
+                                    "pool": pool_state.pool.to_string(),
+                                    "score": score,
+                                    "threshold": score::MIN_CANDIDATE_SCORE,
+                                    "factors": factors,
+                                })),
+                            )
+                            .await;
+                        } else if let Some(candidate) =
+                            score::evaluate_candidate_at(&pool_state, score_ts_ms)
+                        {
                             self.shared.metrics.inc(&self.shared.metrics.signals);
                             let side = if candidate.factors.momentum >= 50 {
                                 "buy"
@@ -188,6 +217,19 @@ impl StrategyEngine {
                                 "reasons": candidate.reasons,
                                 "ts_ms": candidate.ts_ms,
                             });
+                            ctx.decision(
+                                candidate.pair.clone(),
+                                "score_signal_created",
+                                candidate.reasons.clone(),
+                                Some(serde_json::json!({
+                                    "pool": candidate.pool.to_string(),
+                                    "side": side,
+                                    "score": candidate.score,
+                                    "threshold": score::MIN_CANDIDATE_SCORE,
+                                    "factors": candidate.factors,
+                                })),
+                            )
+                            .await;
                             tracing::info!(
                                 pair = %payload["pair"],
                                 score = candidate.score,

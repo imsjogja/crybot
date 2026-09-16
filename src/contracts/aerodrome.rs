@@ -21,7 +21,24 @@ sol! {
         function getAmountsOut(uint256 amountIn, Route[] calldata routes) external view returns (uint256[] memory amounts);
         function getAmountsIn(uint256 amountOut, Route[] calldata routes) external view returns (uint256[] memory amounts);
 
-        event PoolCreated(address indexed token0, address indexed token1, address indexed pool, bool stable);
+    }
+}
+
+sol! {
+    /// Aerodrome V2 PoolFactory interface.
+    /// Alamat: 0x420DD381b31aEf6683db6B902084cB0FFECe40Da
+    #[derive(Debug, PartialEq)]
+    interface IAerodromePoolFactory {
+        event PoolCreated(address indexed token0, address indexed token1, bool indexed stable, address pool, uint256 poolCount);
+    }
+}
+
+sol! {
+    /// Aerodrome Slipstream CLFactory interface.
+    /// Alamat: 0xeC8E5342B19977B4eF8892e02D71DAc57b191583
+    #[derive(Debug, PartialEq)]
+    interface ISlipstreamFactory {
+        event PoolCreated(address indexed token0, address indexed token1, int24 indexed tickSpacing, address pool);
     }
 }
 
@@ -57,3 +74,6 @@ pub const AERODROME_ROUTER_ADDRESS: &str = "0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb
 
 /// Alamat Slipstream NonfungiblePositionManager di Base Network.
 pub const SLIPSTREAM_NFT_MANAGER_ADDRESS: &str = "0x827922686190790b37229fd06084350e74485b72";
+
+/// Alamat Slipstream CLFactory di Base Network.
+pub const SLIPSTREAM_FACTORY_ADDRESS: &str = "0xeC8E5342B19977B4eF8892e02D71DAc57b191583";

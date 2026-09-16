@@ -2,7 +2,7 @@
 //!
 //! Arsitektur: BaseConnector -> StrategyEngine -> BaseExecutor + Store + Monitor + Web
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{mpsc, watch};
@@ -39,6 +39,9 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config/config.yaml"));
     let cfg = AppConfig::load(&cfg_path)?;
+    if !cfg.mode.is_paper() && !cfg.simulation.pre_submit {
+        anyhow::bail!("simulation.pre_submit wajib true di mode non-paper");
+    }
     tracing::info!(mode = ?cfg.mode, path = %cfg_path.display(), "config dimuat");
 
     // Channels
@@ -55,7 +58,9 @@ async fn main() -> Result<()> {
     // Blueprint §4/§7/§13: market state, halt flag, risk engine.
     let market = new_shared_market_state();
     let halt = new_halt_flag();
-    let risk = std::sync::Arc::new(RiskEngine::new(&cfg, halt.clone()));
+    let risk = std::sync::Arc::new(
+        RiskEngine::new(&cfg, halt.clone()).context("gagal menginisialisasi risk engine")?,
+    );
 
     // Base components
     let connector = BaseConnector::new(&cfg.base)?;
@@ -119,7 +124,10 @@ async fn main() -> Result<()> {
 
     handles.push(tokio::spawn(strategy_engine.run()));
     handles.push(tokio::spawn(run_store(rx_log, pool.clone(), tx_ws.clone())));
-    let tx_ws_scanner = tx_ws.clone(); handles.push(tokio::spawn(async move { let _ = crypto_copy_bot::monitor::scanner::run_market_scanner(tx_ws_scanner).await; }));
+    let tx_ws_scanner = tx_ws.clone();
+    handles.push(tokio::spawn(async move {
+        let _ = crypto_copy_bot::monitor::scanner::run_market_scanner(tx_ws_scanner).await;
+    }));
     handles.push(tokio::spawn(run_monitor(rx_monitor, tg.clone())));
 
     if cfg.monitor.commands_enabled {
@@ -150,10 +158,13 @@ async fn main() -> Result<()> {
         let token = std::env::var("DASHBOARD_TOKEN")
             .ok()
             .filter(|t| !t.is_empty());
-        if cfg.web.bind != "127.0.0.1:8080" && token.is_none() {
-            tracing::warn!(
-                "dashboard bind non-localhost TANPA DASHBOARD_TOKEN — tidak disarankan!"
-            );
+        let dashboard_bind: std::net::SocketAddr = cfg
+            .web
+            .bind
+            .parse()
+            .with_context(|| format!("alamat web.bind tidak valid: {}", cfg.web.bind))?;
+        if !dashboard_bind.ip().is_loopback() && token.is_none() {
+            anyhow::bail!("DASHBOARD_TOKEN wajib diisi untuk web.bind non-loopback");
         }
         let state = Arc::new(WebState {
             mode: cfg.mode,
@@ -198,8 +209,13 @@ async fn main() -> Result<()> {
     drop(tx_monitor);
     drop(tx_log);
 
-    for h in &handles {
-        h.abort();
+    for handle in &mut handles {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), &mut *handle)
+            .await
+            .is_err()
+        {
+            handle.abort();
+        }
     }
     tracing::info!("selesai");
     Ok(())

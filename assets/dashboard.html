@@ -99,7 +99,7 @@
 
   <section id="demoBanner" class="notice" role="status"><strong>Bot tidak dapat dijangkau</strong><p>Data terbaru belum tersedia. Dashboard akan mencoba memuat ulang otomatis.</p></section>
   <section id="safetyBanner" class="notice" role="alert"></section>
-  <section id="tokenBox" class="token-box" aria-labelledby="tokenTitle"><strong id="tokenTitle">Dashboard memerlukan token</strong><p class="muted">Masukkan DASHBOARD_TOKEN dari server Anda. Token hanya disimpan di browser ini.</p><label for="tokenInput">Dashboard token</label><input id="tokenInput" type="password" autocomplete="off" placeholder="Tempel token di sini"><div style="margin-top:10px"><button class="btn primary" type="button" onclick="saveToken()">Simpan dan muat ulang</button></div></section>
+  <section id="tokenBox" class="token-box" aria-labelledby="tokenTitle"><strong id="tokenTitle">Dashboard memerlukan token</strong><p class="muted">Masukkan DASHBOARD_TOKEN dari server Anda. Token hanya disimpan di browser ini.</p><label for="tokenInput">Dashboard token</label><input id="tokenInput" type="password" autocomplete="off" placeholder="Tempel token di sini"><div style="margin-top:10px"><button class="btn primary" id="saveTokenBtn" type="button">Simpan dan muat ulang</button></div></section>
 
   <nav class="tabs" aria-label="Bagian dashboard" role="tablist">
     <button class="tab" id="tab-overview" role="tab" aria-selected="true" aria-controls="overview" data-tab="overview">Overview</button>
@@ -117,20 +117,22 @@
     <section id="overview" role="tabpanel" aria-labelledby="tab-overview">
       <div class="action-bar">
         <span class="action-note">Data diperbarui real-time via WebSocket. Tidak ada tombol untuk mengaktifkan perdagangan live.</span>
-        <button class="btn danger" id="haltBtn" type="button" onclick="doHalt()">Emergency halt</button>
-        <button class="btn resume" id="resumeBtn" type="button" onclick="doResume()">Clear halt</button>
-        <button class="btn danger" type="button" onclick="doStop()">Stop bot</button>
-        <button class="btn" type="button" onclick="loadAll()">Muat ulang</button>
+        <button class="btn danger" id="haltBtn" type="button">Emergency halt</button>
+        <button class="btn resume" id="resumeBtn" type="button">Clear halt</button>
+        <button class="btn danger" id="stopBtn" type="button">Stop bot</button>
+        <button class="btn" id="reloadBtn" type="button">Muat ulang</button>
       </div>
       <div class="grid">
         <article class="card"><h2>Wallet bot</h2><p>Alamat signer yang dipakai bot untuk tx Base.</p><div class="metric small" id="walletAddress">—</div></article>
         <article class="card"><h2>RPC Base</h2><p>Endpoint HTTP yang digunakan bot.</p><div class="metric small" id="baseRpc">—</div></article>
         <article class="card" id="safetyCard"><h2>Keamanan eksekusi</h2><p>Periksa ini sebelum menilai hasil.</p><div class="metric" id="safetyState">—</div><div class="rows"><div class="row"><span>Mode</span><span id="safeMode">—</span></div><div class="row"><span>risk.armed</span><span id="safeArmed">—</span></div><div class="row"><span>Halt pengaman</span><span id="safeHalt">—</span></div></div></article>
         <article class="card"><h2>Metrik eksekusi</h2><p>Order, fill, dan error dari Base executor.</p><div class="rows"><div class="row"><span>Orders</span><span id="mOrders">—</span></div><div class="row"><span>Fills</span><span id="mFills">—</span></div><div class="row"><span>Errors</span><span id="mErrors">—</span></div></div></article>
+        <article class="card"><h2>Feed Base</h2><p>Header dan log factory yang diterima connector.</p><div class="rows"><div class="row"><span>New heads</span><span id="mNewHeads">—</span></div><div class="row"><span>Factory logs raw</span><span id="mFactoryLogs">—</span></div><div class="row"><span>Pool terdecode</span><span id="mPoolsDetected">—</span></div><div class="row"><span>Factory topic tidak dikenal</span><span id="mFactoryUnknownLogs">—</span></div></div></article>
         <article class="card"><h2>Latensi e2e</h2><p>Waktu order sampai fill/simulasi.</p><div class="rows"><div class="row"><span>p50 / p95 / p99</span><span id="latE2e">—</span></div></div></article>
         <article class="card"><h2 id="activeStrategyTitle">Strategi aktif</h2><p>Jumlah strategi Base yang enabled.</p><div class="metric" id="strategyCount">—</div><div class="muted" id="strategyList">Menunggu data…</div></article>
         <article class="card full"><h2>Aktivitas Base terbaru</h2><p>Swap paper/live dan error eksekusi dari event log.</p><div id="tradeTable" class="empty">Memuat riwayat…</div></article>
         <article class="card full"><h2>Sinyal &amp; pool terpantau</h2><p>Kandidat dari strategi sniper dan scoring multi-faktor. Bersifat paper — tidak ada auto-buy.</p><div id="signalTable" class="empty">Memuat sinyal…</div></article>
+        <article class="card full"><h2>Log keputusan strategi</h2><p>Keputusan kandidat dan skip yang telah tersimpan. Tidak mencatat setiap block.</p><div id="decisionTable" class="empty">Memuat keputusan…</div></article>
       </div>
     </section>
 
@@ -183,28 +185,18 @@ function setSafetyBanner(status) {
   if (status.halt) { banner.className = 'notice'; banner.innerHTML = '<strong>Halt pengaman aktif.</strong><p>Order baru diblokir. Gunakan “Clear halt” hanya setelah penyebabnya ditinjau.</p>'; banner.style.display = 'block'; return; }
   banner.style.display = 'none';
 }
+function appendCell(row, text, className = '') {
+  const cell = document.createElement('td'); cell.textContent = String(text ?? ''); if (className) cell.className = className; row.appendChild(cell); return cell;
+}
 function renderScanner(data) {
-  if (!data || !data.data || data.data.length === 0) return;
-  const pools = data.data;
-  const html = `<div class="table-wrap"><table>
-    <thead><tr><th>Token</th><th>Pool</th><th>Price</th><th>Vol 24h</th><th>Action</th></tr></thead>
-    <tbody>${pools.map(p => {
-      const attrs = p.attributes || {};
-      const tokenName = attrs.name || 'Unknown';
-      const price = attrs.base_token_price_usd ? '$' + parseFloat(attrs.base_token_price_usd).toPrecision(4) : '-';
-      const vol = attrs.volume_usd && attrs.volume_usd.h24 ? '$' + parseFloat(attrs.volume_usd.h24).toFixed(0) : '-';
-      const poolAddr = attrs.address || '';
-      const baseTokenAddr = p.relationships && p.relationships.base_token && p.relationships.base_token.data ? p.relationships.base_token.data.id : '';
-      const addr = baseTokenAddr.includes('_') ? baseTokenAddr.split('_')[1] : baseTokenAddr;
-      return `<tr>
-        <td><strong>${esc(tokenName)}</strong></td>
-        <td class="muted">${esc(poolAddr.substring(0,6) + '...' + poolAddr.substring(poolAddr.length-4))}</td>
-        <td>${esc(price)}</td>
-        <td>${esc(vol)}</td>
-        <td><a href="javascript:void(0)" onclick="showChart('${esc(addr)}/WETH')" class="btn" style="padding:0.25rem 0.5rem">Chart</a></td>
-      </tr>`;
-    }).join('')}</tbody></table></div>`;
-  $('scannerTable').innerHTML = html;
+  const root = $('scannerTable'); root.replaceChildren();
+  const pools = data && Array.isArray(data.data) ? data.data : [];
+  if (!pools.length) { root.textContent = 'Belum ada data scanner.'; root.className = 'empty'; return; }
+  root.className = ''; const wrap = document.createElement('div'); wrap.className = 'table-wrap'; const table = document.createElement('table');
+  const head = document.createElement('thead'); const header = document.createElement('tr'); ['Token', 'Pool', 'Price', 'Vol 24h', 'Action'].forEach(label => { const th = document.createElement('th'); th.textContent = label; header.appendChild(th); }); head.appendChild(header); table.appendChild(head);
+  const body = document.createElement('tbody');
+  pools.forEach(pool => { const attrs = pool && pool.attributes || {}; const rel = pool && pool.relationships || {}; const base = rel.base_token && rel.base_token.data && rel.base_token.data.id || ''; const addr = String(base).includes('_') ? String(base).split('_').pop() : String(base); const row = document.createElement('tr'); const name = appendCell(row, attrs.name || 'Unknown'); const strong = document.createElement('strong'); strong.textContent = name.textContent; name.replaceChildren(strong); const poolAddr = String(attrs.address || ''); appendCell(row, poolAddr ? `${poolAddr.slice(0, 6)}…${poolAddr.slice(-4)}` : '-', 'muted'); const priceValue = Number(attrs.base_token_price_usd); appendCell(row, Number.isFinite(priceValue) ? `$${priceValue.toPrecision(4)}` : '-'); const volumeValue = Number(attrs.volume_usd && attrs.volume_usd.h24); appendCell(row, Number.isFinite(volumeValue) ? `$${volumeValue.toFixed(0)}` : '-'); const action = document.createElement('td'); const button = document.createElement('button'); button.type = 'button'; button.className = 'btn'; button.style.padding = '0.25rem 0.5rem'; button.textContent = 'Chart'; button.addEventListener('click', () => showChart(`${addr}/WETH`)); action.appendChild(button); row.appendChild(action); body.appendChild(row); });
+  table.appendChild(body); wrap.appendChild(table); root.appendChild(wrap);
 }
 function renderStatus(s) {
   const mode = String(s.mode || '—'); const live = mode.toLowerCase() === 'live'; const armed = Boolean(s.armed); const halted = Boolean(s.halt);
@@ -218,6 +210,7 @@ function renderStatus(s) {
   $('walletAddress').title = s.wallet_address || '';
   $('baseRpc').textContent = s.base_http_url || '—';
   const metrics = s.metrics || {}; $('mOrders').textContent = esc(metrics.orders ?? '—'); $('mFills').textContent = esc(metrics.fills ?? '—'); $('mErrors').innerHTML = num(metrics.errors) ? `<span class="neg">${esc(metrics.errors)}</span>` : '0';
+  $('mNewHeads').textContent = esc(metrics.new_heads_received ?? '—'); $('mFactoryLogs').textContent = esc(metrics.factory_logs_received ?? '—'); $('mPoolsDetected').textContent = esc(metrics.pools_detected ?? '—'); $('mFactoryUnknownLogs').textContent = esc(metrics.factory_unknown_logs ?? '—');
   $('latE2e').textContent = `${esc(metrics.e2e_p50)} / ${esc(metrics.e2e_p95)} / ${esc(metrics.e2e_p99)}`;
   const strategies = Array.isArray(s.strategies) ? s.strategies : []; const active = strategies.filter(x => x.enabled).map(x => x.name);
   $('strategyCount').textContent = active.length; $('strategyList').innerHTML = active.length ? active.map(n => `<span style="color:var(--green)">&#9679;</span> ${esc(n)}`).join(', ') : 'Tidak ada strategi aktif';
@@ -270,17 +263,24 @@ function renderSignals(result) {
     const sidePill = side === 'buy' || side === 'sell' ? `<span class="pill ${side}">${esc(side.toUpperCase())}</span>` : esc(signal.side || '—');
     const score = num(signal.score);
     const reasons = Array.isArray(signal.reasons) ? signal.reasons.join(' · ') : String(signal.reasons || '—');
-    return `<tr><td>${esc(time)}</td><td><a href="javascript:void(0)" onclick="showChart('${esc(pair)}')" style="color:var(--blue);text-decoration:none;"><strong title="${esc(pair)}">${esc(pairShort)}</strong></a></td><td>${sidePill}</td><td>${score > 0 ? esc(score) : '—'}</td><td>${esc(signal.strategy || '—')}</td><td class="muted">${esc(reasons)}</td></tr>`;
+    return `<tr><td>${esc(time)}</td><td><button type="button" class="chart-signal" data-pair="${encodeURIComponent(pair)}" style="color:var(--blue);text-decoration:none;background:none;border:0;padding:0;font:inherit;"><strong title="${esc(pair)}">${esc(pairShort)}</strong></button></td><td>${sidePill}</td><td>${score > 0 ? esc(score) : '—'}</td><td>${esc(signal.strategy || '—')}</td><td class="muted">${esc(reasons)}</td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 function renderOptionalStrategies(result) {
   const text = result.available ? 'Endpoint strategi tersedia. Detail konfigurasi bisa dilihat di tab Overview.' : 'Belum tersedia dari server ini.';
   ['strategySniper', 'strategyArbitrage', 'strategyYield', 'strategyPerps'].forEach(id => { $(id).textContent = text; });
 }
+function renderDecisions(result) {
+  const root = $('decisionTable'); const decisions = result && Array.isArray(result.decisions) ? result.decisions : [];
+  root.replaceChildren();
+  if (!decisions.length) { root.className = 'empty'; root.textContent = 'Belum ada keputusan strategi yang tercatat.'; return; }
+  root.className = ''; const wrap = document.createElement('div'); wrap.className = 'table-wrap'; const table = document.createElement('table'); const head = document.createElement('thead'); const header = document.createElement('tr'); ['Waktu', 'Strategi', 'Pair', 'Keputusan', 'Alasan'].forEach(label => { const th = document.createElement('th'); th.textContent = label; header.appendChild(th); }); head.appendChild(header); table.appendChild(head); const body = document.createElement('tbody');
+  decisions.forEach(item => { const row = document.createElement('tr'); const time = new Date(item.ts_ms).toLocaleString('id-ID', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }); appendCell(row, time); appendCell(row, item.strategy || '—'); appendCell(row, item.pair || '—'); appendCell(row, item.decision || '—'); const reasons = Array.isArray(item.reasons) ? item.reasons.join(' · ') : String(item.reasons || '—'); appendCell(row, reasons, 'muted'); body.appendChild(row); }); table.appendChild(body); wrap.appendChild(table); root.appendChild(wrap);
+}
 async function loadAll() {
   try {
-    const [status, trades, signals] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals')]);
-    renderStatus(status); renderTrades(trades); renderSignals(signals); setConnection('Polling aktif', 'ok');
+    const [status, trades, signals, decisions] = await Promise.all([api('/api/status'), api('/api/trades'), api('/api/signals'), api('/api/decisions')]);
+    renderStatus(status); renderTrades(trades); renderSignals(signals); renderDecisions(decisions); localDecisions = decisions && Array.isArray(decisions.decisions) ? decisions.decisions : []; setConnection('Polling aktif', 'ok');
     const strategies = await optionalApi('/api/strategies'); renderOptionalStrategies(strategies);
   } catch (error) {
     if (error.message === 'unauthorized') return;
@@ -289,6 +289,7 @@ async function loadAll() {
 }
 let localSignals = [];
 let localTrades = [];
+let localDecisions = [];
 function connectWebSocket() {
   if (!('WebSocket' in window)) { setConnection('Polling fallback', 'info'); loadAll(); setInterval(loadAll, 5000); return; }
   let retryDelay = 3000;
@@ -312,11 +313,20 @@ function connectWebSocket() {
               localTrades = msg.trades && Array.isArray(msg.trades.trades) ? msg.trades.trades : [];
               renderSignals(msg.signals);
               localSignals = msg.signals && Array.isArray(msg.signals.signals) ? msg.signals.signals : [];
+              renderDecisions(msg.decisions);
+              localDecisions = msg.decisions && Array.isArray(msg.decisions.decisions) ? msg.decisions.decisions : [];
               renderOptionalStrategies({ available: true, data: msg.strategies });
               break;
             case 'StatusUpdate':
               renderStatus(msg.data);
               break;
+            case 'NewDecision': {
+              const decision = { ts_ms: msg.ts_ms, strategy: msg.strategy, pair: msg.pair, decision: msg.decision, reasons: msg.reasons, data: msg.data };
+              localDecisions.unshift(decision);
+              if (localDecisions.length > 100) localDecisions.length = 100;
+              renderDecisions({ decisions: localDecisions });
+              break;
+            }
             case 'NewSignal': {
               let reasons = msg.reasons;
               try { reasons = JSON.parse(reasons); } catch (_) {}
@@ -356,18 +366,18 @@ document.querySelectorAll('[role="tab"]').forEach(tab => tab.addEventListener('c
 
 function showChart(pairStr) {
   if (!pairStr || pairStr === '—') return;
-  const tokens = pairStr.split('/');
-  const target = tokens[0];
-  if (!target.startsWith('0x')) return;
-  
-  const chartInlineBox = $('chartInlineBox');
-  const chartTitle = $('chartTitle');
-  const chartContainer = $('chartContainer');
-  
-  chartInlineBox.style.display = 'block';
-  chartTitle.textContent = pairStr;
-  chartContainer.innerHTML = `<iframe src="https://dexscreener.com/base/${target}?embed=1&theme=dark&info=0" width="100%" height="100%" frameborder="0"></iframe>`;
+  const target = String(pairStr).split('/')[0];
+  if (!/^0x[0-9a-fA-F]{40}$/.test(target)) return;
+  const chartInlineBox = $('chartInlineBox'); const chartTitle = $('chartTitle'); const chartContainer = $('chartContainer');
+  const iframe = document.createElement('iframe'); iframe.width = '100%'; iframe.height = '100%'; iframe.setAttribute('frameborder', '0'); iframe.src = `https://dexscreener.com/base/${encodeURIComponent(target)}?embed=1&theme=dark&info=0`;
+  chartInlineBox.style.display = 'block'; chartTitle.textContent = pairStr; chartContainer.replaceChildren(iframe);
 }
+document.addEventListener('click', event => { const button = event.target.closest('.chart-signal'); if (!button) return; try { showChart(decodeURIComponent(button.dataset.pair || '')); } catch (_) {} });
+$('saveTokenBtn').addEventListener('click', saveToken);
+$('haltBtn').addEventListener('click', doHalt);
+$('resumeBtn').addEventListener('click', doResume);
+$('stopBtn').addEventListener('click', doStop);
+$('reloadBtn').addEventListener('click', loadAll);
 
 connectWebSocket();
 </script>

@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use alloy::primitives::{Address, U256};
+use anyhow::Context;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 
@@ -63,8 +64,13 @@ impl DailyLoss {
 impl RiskEngine {
     /// Bangun risk engine dari config. Router allowlist: bila
     /// `risk.allowed_routers` kosong, default = semua router di `base.addresses`.
-    pub fn new(cfg: &AppConfig, halt: HaltFlag) -> Self {
-        let max_tx_value_wei = eth_to_wei(cfg.risk.max_tx_value_eth);
+    ///
+    /// # Errors
+    /// `risk.max_tx_value_eth` tidak valid (negatif atau overflow saat
+    /// konversi ke wei) — diperlakukan sebagai error validasi config.
+    pub fn new(cfg: &AppConfig, halt: HaltFlag) -> anyhow::Result<Self> {
+        let max_tx_value_wei =
+            eth_to_wei(cfg.risk.max_tx_value_eth).context("risk.max_tx_value_eth tidak valid")?;
 
         let allowed_routers: HashSet<Address> = if cfg.risk.allowed_routers.is_empty() {
             let a = &cfg.base.addresses;
@@ -79,11 +85,7 @@ impl RiskEngine {
             .into_iter()
             .collect()
         } else {
-            cfg.risk
-                .allowed_routers
-                .iter()
-                .copied()
-                .collect()
+            cfg.risk.allowed_routers.iter().copied().collect()
         };
 
         tracing::info!(
@@ -94,7 +96,7 @@ impl RiskEngine {
             "risk engine siap (blueprint §7)"
         );
 
-        Self {
+        Ok(Self {
             max_tx_value_wei,
             allowed_routers,
             cfg: cfg.risk.clone(),
@@ -105,7 +107,7 @@ impl RiskEngine {
                 realized_loss_pct: Decimal::ZERO,
                 locked: false,
             }),
-        }
+        })
     }
 
     pub fn halt_flag(&self) -> HaltFlag {
@@ -184,7 +186,9 @@ impl RiskEngine {
         }
 
         // 7. Daily loss hard lock + circuit breaker (§7).
-        if self.daily_lock_active(now) {
+        // Hard lock BUY saja: SELL (unwind/cut-loss) harus tetap bisa jalan
+        // agar posisi bisa ditutup — konsisten dengan gate halt di atas.
+        if intent.side == Side::Buy && self.daily_lock_active(now) {
             checks.push(RiskDecision::reject(format!(
                 "daily loss limit {}% tercapai — hard lock sampai hari berganti",
                 self.cfg.daily_loss_limit_pct
@@ -198,6 +202,32 @@ impl RiskEngine {
         }
 
         RiskDecision::combine(checks)
+    }
+
+    /// Cek ulang TOCTOU tepat sebelum submit: gate halt + TTL quote.
+    ///
+    /// Dipanggil executor setelah simulasi lolos, sesaat sebelum `execute_swap`,
+    /// agar perintah halt operator yang datang selama simulasi tetap menghentikan
+    /// submit, dan quote tidak kedaluwarsa di tengah pipeline.
+    pub fn pre_submit_check(
+        &self,
+        side: Side,
+        quote_ts_ms: i64,
+        quote_ttl_ms: i64,
+    ) -> std::result::Result<(), String> {
+        if self.is_halted() {
+            let sell_allowed = self.cfg.allow_sell_during_halt && side == Side::Sell;
+            if !sell_allowed {
+                return Err("emergency stop aktif — submit dibatalkan (TOCTOU)".to_string());
+            }
+        }
+        let age = now_ms().saturating_sub(quote_ts_ms);
+        if age > quote_ttl_ms {
+            return Err(format!(
+                "quote stale saat submit: umur {age} ms > ttl {quote_ttl_ms} ms"
+            ));
+        }
+        Ok(())
     }
 
     /// Catat hasil eksekusi untuk circuit breaker.
@@ -218,6 +248,9 @@ impl RiskEngine {
 
     /// Catat realized PnL (persen equity) untuk daily loss lock (§6/§7).
     /// Diisi oleh position manager saat posisi ditutup.
+    // TODO: saat ini BELUM ada caller produksi — position manager belum
+    // memanggil fungsi ini, sehingga daily loss lock tidak pernah terpicu
+    // di runtime. Wire dari komponen penutup posisi saat fitur itu ada.
     pub fn record_realized_pnl(&self, pnl_pct: Decimal) {
         let now = now_ms();
         let mut d = self.daily.lock().expect("daily loss lock poisoned");
@@ -267,10 +300,24 @@ impl RiskEngine {
     }
 }
 
-fn eth_to_wei(eth: Decimal) -> U256 {
-    let wei = eth * Decimal::from(1_000_000_000_000_000_000u128);
-    let wei = wei.trunc().to_u128().unwrap_or(u128::MAX);
-    U256::from(wei)
+/// Konversi ETH (desimal) ke wei (U256).
+///
+/// # Errors
+/// `Err` bila nilai negatif atau hasil konversi overflow `u128` — config
+/// fat-fingered tidak boleh diam-diam mengubah batas menjadi tak terbatas.
+fn eth_to_wei(eth: Decimal) -> anyhow::Result<U256> {
+    anyhow::ensure!(
+        !eth.is_sign_negative(),
+        "nilai ETH tidak boleh negatif: {eth}"
+    );
+    let wei = eth
+        .checked_mul(Decimal::from(1_000_000_000_000_000_000u128))
+        .ok_or_else(|| anyhow::anyhow!("nilai ETH {eth} overflow saat konversi ke wei"))?;
+    let wei = wei
+        .trunc()
+        .to_u128()
+        .ok_or_else(|| anyhow::anyhow!("nilai ETH {eth} overflow saat konversi ke wei"))?;
+    Ok(U256::from(wei))
 }
 
 #[cfg(test)]
@@ -320,21 +367,21 @@ base:
 
     #[test]
     fn disarmed_memblokir_semua_order() {
-        let engine = RiskEngine::new(&cfg(false), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(false), new_halt_flag()).unwrap();
         let d = engine.evaluate(&intent(Side::Buy), 3_000);
         assert!(!d.is_pass());
     }
 
     #[test]
     fn armed_dan_intent_valid_lolos() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         assert!(engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
         assert!(engine.evaluate(&intent(Side::Sell), 3_000).is_pass());
     }
 
     #[test]
     fn halt_memblokir_buy_tapi_bolehkan_sell_terkontrol() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         engine.emergency_stop();
         assert!(!engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
         assert!(engine.evaluate(&intent(Side::Sell), 3_000).is_pass());
@@ -344,7 +391,7 @@ base:
 
     #[test]
     fn router_di_luar_allowlist_ditolak() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         let mut i = intent(Side::Buy);
         i.router = Address::ZERO;
         assert!(!engine.evaluate(&i, 3_000).is_pass());
@@ -352,7 +399,7 @@ base:
 
     #[test]
     fn nilai_tx_melebihi_batas_ditolak() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         let mut i = intent(Side::Buy);
         i.value = U256::from(10u128.pow(20)); // 100 ETH > 0.05 default
         assert!(!engine.evaluate(&i, 3_000).is_pass());
@@ -360,7 +407,7 @@ base:
 
     #[test]
     fn quote_basi_ditolak() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         let mut i = intent(Side::Buy);
         i.quote_ts_ms = now_ms() - 10_000;
         assert!(!engine.evaluate(&i, 3_000).is_pass());
@@ -369,7 +416,7 @@ base:
 
     #[test]
     fn daily_loss_lock_memblokir() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         engine.record_realized_pnl(Decimal::new(-25, 1)); // -2.5%
         assert!(engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
         engine.record_realized_pnl(Decimal::new(-1, 0)); // total -3.5% >= 3%
@@ -377,8 +424,17 @@ base:
     }
 
     #[test]
+    fn daily_loss_lock_tidak_memblokir_sell() {
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
+        engine.record_realized_pnl(Decimal::new(-35, 1)); // -3.5% >= 3% → locked
+        assert!(!engine.evaluate(&intent(Side::Buy), 3_000).is_pass());
+        // SELL (unwind/cut-loss) harus tetap lolos saat daily-loss lock aktif.
+        assert!(engine.evaluate(&intent(Side::Sell), 3_000).is_pass());
+    }
+
+    #[test]
     fn circuit_breaker_trip_setelah_error_beruntun() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         for _ in 0..5 {
             engine.record_outcome(false);
         }
@@ -390,11 +446,44 @@ base:
 
     #[test]
     fn price_impact_di_atas_ambang_ditolak() {
-        let engine = RiskEngine::new(&cfg(true), new_halt_flag());
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
         let mut i = intent(Side::Buy);
         i.price_impact_pct = Some(Decimal::from(15)); // 15% > default 10%
         assert!(!engine.evaluate(&i, 3_000).is_pass());
         i.price_impact_pct = Some(Decimal::from(3));
         assert!(engine.evaluate(&i, 3_000).is_pass());
+    }
+
+    #[test]
+    fn eth_to_wei_overflow_ditolak() {
+        // u128::MAX wei ≈ 3.4e20 ETH; nilai di atas itu harus error, bukan clamp.
+        assert!(eth_to_wei(Decimal::from(1_000_000u64)).is_ok());
+        assert!(eth_to_wei(Decimal::MAX).is_err());
+        assert!(eth_to_wei(Decimal::new(-1, 0)).is_err());
+    }
+
+    #[test]
+    fn max_tx_value_eth_overflow_gagalkan_konstruksi() {
+        let mut c = cfg(true);
+        c.risk.max_tx_value_eth = Decimal::MAX;
+        assert!(RiskEngine::new(&c, new_halt_flag()).is_err());
+    }
+
+    #[test]
+    fn pre_submit_check_tolak_halt_dan_quote_basi() {
+        let engine = RiskEngine::new(&cfg(true), new_halt_flag()).unwrap();
+        let now = now_ms();
+
+        // Kondisi normal: lolos.
+        assert!(engine.pre_submit_check(Side::Buy, now, 3_000).is_ok());
+
+        // Quote basi: ditolak.
+        let err = engine.pre_submit_check(Side::Buy, now - 10_000, 3_000);
+        assert!(err.unwrap_err().contains("stale"));
+
+        // Halt di tengah pipeline: BUY dibatalkan, SELL terkontrol tetap lolos.
+        engine.emergency_stop();
+        assert!(engine.pre_submit_check(Side::Buy, now, 3_000).is_err());
+        assert!(engine.pre_submit_check(Side::Sell, now, 3_000).is_ok());
     }
 }

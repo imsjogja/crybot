@@ -29,7 +29,8 @@ impl CopyOnChainStrategy {
     }
 
     fn tx_is_new(&mut self, tx_hash: &str) -> bool {
-        self.seen_tx_hashes.insert(tx_hash.trim().to_ascii_lowercase())
+        self.seen_tx_hashes
+            .insert(tx_hash.trim().to_ascii_lowercase())
     }
 }
 

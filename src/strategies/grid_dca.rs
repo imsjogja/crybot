@@ -202,14 +202,20 @@ mod tests {
 
     fn grid() -> GridCfg {
         GridCfg {
-            token_in: "0x0000000000000000000000000000000000000001".parse().unwrap(),
-            token_out: "0x0000000000000000000000000000000000000002".parse().unwrap(),
+            token_in: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            token_out: "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
             pair: "WETH/USDC".into(),
             upper_price: Decimal::from(200),
             lower_price: Decimal::from(100),
             grid_count: 4,
             amount_per_grid: Decimal::ONE,
-            dex_router: "0x0000000000000000000000000000000000000001".parse().unwrap(),
+            dex_router: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
         }
     }
 
@@ -242,12 +248,18 @@ mod tests {
     #[test]
     fn dca_trigger_requires_equal_positive_amount() {
         let plan = DcaCfg {
-            token_in: "0x0000000000000000000000000000000000000001".parse().unwrap(),
-            token_out: "0x0000000000000000000000000000000000000002".parse().unwrap(),
+            token_in: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
+            token_out: "0x0000000000000000000000000000000000000002"
+                .parse()
+                .unwrap(),
             pair: "WETH/USDC".into(),
             interval_secs: 60,
             amount: Decimal::ONE,
-            dex_router: "0x0000000000000000000000000000000000000001".parse().unwrap(),
+            dex_router: "0x0000000000000000000000000000000000000001"
+                .parse()
+                .unwrap(),
         };
         assert!(matches_dca_trigger(&plan, Decimal::ONE));
         assert!(!matches_dca_trigger(&plan, Decimal::ZERO));
