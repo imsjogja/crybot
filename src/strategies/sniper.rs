@@ -29,6 +29,7 @@ const MAX_OPEN_PAPER_POSITIONS: usize = 100;
 const RESERVE_RPC_MAX_ATTEMPTS: u32 = 3;
 const RESERVE_RPC_INITIAL_BACKOFF_MS: u64 = 1_000;
 const RESERVE_RPC_MIN_SPACING_MS: u64 = 1_000;
+const RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS: u64 = 30_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Candidate {
@@ -57,6 +58,12 @@ enum ExitReason {
     StopLoss,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReserveReadFailure {
+    RateLimited,
+    Other,
+}
+
 impl ExitReason {
     fn decision(self) -> &'static str {
         match self {
@@ -73,6 +80,7 @@ pub struct SniperStrategy {
     positions: Vec<VirtualPosition>,
     last_poll_ms: i64,
     last_reserve_read_at: Option<tokio::time::Instant>,
+    reserve_rate_limit_until: Option<tokio::time::Instant>,
 }
 
 impl SniperStrategy {
@@ -83,6 +91,7 @@ impl SniperStrategy {
             positions: Vec::new(),
             last_poll_ms: 0,
             last_reserve_read_at: None,
+            reserve_rate_limit_until: None,
         }
     }
 
@@ -222,6 +231,16 @@ impl SniperStrategy {
         pool: Address,
         provider: &alloy::providers::RootProvider,
     ) -> Option<(U256, U256)> {
+        let now = tokio::time::Instant::now();
+        if let Some(cooldown_until) = self.reserve_rate_limit_until {
+            let delay_ms = reserve_cooldown_delay_ms(
+                cooldown_until.saturating_duration_since(now).as_millis() as u64,
+            );
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+            self.reserve_rate_limit_until = None;
+        }
         if let Some(last_read_at) = self.last_reserve_read_at {
             let elapsed = tokio::time::Instant::now().saturating_duration_since(last_read_at);
             let delay_ms = reserve_spacing_delay_ms(elapsed.as_millis() as u64);
@@ -230,7 +249,17 @@ impl SniperStrategy {
             }
         }
         self.last_reserve_read_at = Some(tokio::time::Instant::now());
-        read_reserves(pool, provider).await
+        match read_reserves(pool, provider).await {
+            Ok(reserves) => Some(reserves),
+            Err(ReserveReadFailure::RateLimited) => {
+                self.reserve_rate_limit_until = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS),
+                );
+                None
+            }
+            Err(ReserveReadFailure::Other) => None,
+        }
     }
 
     async fn poll_positions(&mut self, state: &SharedState) {
@@ -392,21 +421,28 @@ impl Strategy for SniperStrategy {
 async fn read_reserves(
     pool: Address,
     provider: &alloy::providers::RootProvider,
-) -> Option<(U256, U256)> {
+) -> Result<(U256, U256), ReserveReadFailure> {
     for attempt in 1..=RESERVE_RPC_MAX_ATTEMPTS {
         match read_reserves_once(pool, provider).await {
-            Ok(reserves) => return Some(reserves),
+            Ok(reserves) => return Ok(reserves),
             Err(error) => {
-                if let Some(delay_ms) = reserve_retry_delay_ms(attempt) {
+                let rate_limited = is_rate_limited_error(&error);
+                if let Some(delay_ms) = reserve_retry_delay_ms(attempt, rate_limited) {
                     tracing::debug!(%pool, attempt, delay_ms, %error, "getReserves V2 gagal; retry terbatas");
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 } else {
-                    tracing::warn!(%pool, attempt, max_attempts = RESERVE_RPC_MAX_ATTEMPTS, %error, "getReserves V2 gagal setelah retry terbatas");
+                    let failure = if rate_limited {
+                        ReserveReadFailure::RateLimited
+                    } else {
+                        ReserveReadFailure::Other
+                    };
+                    tracing::warn!(%pool, attempt, max_attempts = RESERVE_RPC_MAX_ATTEMPTS, rate_limited, %error, "getReserves V2 gagal setelah retry terbatas");
+                    return Err(failure);
                 }
             }
         }
     }
-    None
+    Err(ReserveReadFailure::Other)
 }
 
 async fn read_reserves_once(
@@ -425,14 +461,27 @@ async fn read_reserves_once(
     Ok((U256::from(reserves.reserve0), U256::from(reserves.reserve1)))
 }
 
-fn reserve_retry_delay_ms(attempt: u32) -> Option<u64> {
-    (1..RESERVE_RPC_MAX_ATTEMPTS)
-        .contains(&attempt)
+fn is_rate_limited_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("http error 429")
+        || error.contains("status 429")
+        || error.contains("too many requests")
+        || error.contains("rate limit")
+        || error.contains("rate-limit")
+        || error.contains("over rate limit")
+}
+
+fn reserve_retry_delay_ms(attempt: u32, rate_limited: bool) -> Option<u64> {
+    (!rate_limited && (1..RESERVE_RPC_MAX_ATTEMPTS).contains(&attempt))
         .then(|| RESERVE_RPC_INITIAL_BACKOFF_MS << (attempt - 1))
 }
 
 fn reserve_spacing_delay_ms(elapsed_ms: u64) -> u64 {
     RESERVE_RPC_MIN_SPACING_MS.saturating_sub(elapsed_ms)
+}
+
+fn reserve_cooldown_delay_ms(remaining_ms: u64) -> u64 {
+    remaining_ms.min(RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS)
 }
 
 fn v2_factory_supported(factory: Address, addresses: &crate::config::BaseAddresses) -> bool {
@@ -663,12 +712,28 @@ mod tests {
     }
 
     #[test]
-    fn reserve_retry_delays_are_bounded_and_public_rpc_friendly() {
-        assert_eq!(reserve_retry_delay_ms(0), None);
-        assert_eq!(reserve_retry_delay_ms(1), Some(1_000));
-        assert_eq!(reserve_retry_delay_ms(2), Some(2_000));
-        assert_eq!(reserve_retry_delay_ms(3), None);
-        assert_eq!(reserve_retry_delay_ms(4), None);
+    fn reserve_retry_policy_skips_retries_for_rate_limits() {
+        assert_eq!(reserve_retry_delay_ms(0, false), None);
+        assert_eq!(reserve_retry_delay_ms(1, false), Some(1_000));
+        assert_eq!(reserve_retry_delay_ms(2, false), Some(2_000));
+        assert_eq!(reserve_retry_delay_ms(3, false), None);
+        assert_eq!(reserve_retry_delay_ms(1, true), None);
+        assert_eq!(reserve_retry_delay_ms(2, true), None);
+    }
+
+    #[test]
+    fn rate_limit_errors_are_detected_without_network_access() {
+        assert!(is_rate_limited_error("HTTP error 429 over rate limit"));
+        assert!(is_rate_limited_error("Too Many Requests"));
+        assert!(is_rate_limited_error("upstream RATE-LIMIT exceeded"));
+        assert!(!is_rate_limited_error("connection reset by peer"));
+    }
+
+    #[test]
+    fn rate_limit_cooldown_is_bounded_to_thirty_seconds() {
+        assert_eq!(reserve_cooldown_delay_ms(30_000), 30_000);
+        assert_eq!(reserve_cooldown_delay_ms(1_500), 1_500);
+        assert_eq!(reserve_cooldown_delay_ms(40_000), 30_000);
     }
 
     #[test]
