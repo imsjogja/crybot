@@ -27,7 +27,8 @@ const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
 const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
 const MAX_OPEN_PAPER_POSITIONS: usize = 100;
 const RESERVE_RPC_MAX_ATTEMPTS: u32 = 3;
-const RESERVE_RPC_INITIAL_BACKOFF_MS: u64 = 100;
+const RESERVE_RPC_INITIAL_BACKOFF_MS: u64 = 1_000;
+const RESERVE_RPC_MIN_SPACING_MS: u64 = 1_000;
 
 #[derive(Debug, Clone, Copy)]
 struct Candidate {
@@ -71,6 +72,7 @@ pub struct SniperStrategy {
     seen_pools: HashSet<Address>,
     positions: Vec<VirtualPosition>,
     last_poll_ms: i64,
+    last_reserve_read_at: Option<tokio::time::Instant>,
 }
 
 impl SniperStrategy {
@@ -80,6 +82,7 @@ impl SniperStrategy {
             seen_pools: HashSet::new(),
             positions: Vec::new(),
             last_poll_ms: 0,
+            last_reserve_read_at: None,
         }
     }
 
@@ -140,7 +143,8 @@ impl SniperStrategy {
             return;
         }
 
-        let Some((reserve0, reserve1)) = read_reserves(pool, &state.provider).await else {
+        let Some((reserve0, reserve1)) = self.read_reserves_paced(pool, &state.provider).await
+        else {
             ctx.decision(
                 pair,
                 "skip_reserve_rpc",
@@ -213,6 +217,22 @@ impl SniperStrategy {
         .await;
     }
 
+    async fn read_reserves_paced(
+        &mut self,
+        pool: Address,
+        provider: &alloy::providers::RootProvider,
+    ) -> Option<(U256, U256)> {
+        if let Some(last_read_at) = self.last_reserve_read_at {
+            let elapsed = tokio::time::Instant::now().saturating_duration_since(last_read_at);
+            let delay_ms = reserve_spacing_delay_ms(elapsed.as_millis() as u64);
+            if delay_ms > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+        }
+        self.last_reserve_read_at = Some(tokio::time::Instant::now());
+        read_reserves(pool, provider).await
+    }
+
     async fn poll_positions(&mut self, state: &SharedState) {
         let now = now_ms();
         if self.positions.is_empty()
@@ -222,11 +242,14 @@ impl SniperStrategy {
             return;
         }
         self.last_poll_ms = now;
-        let mut still_open = Vec::with_capacity(self.positions.len());
-        for position in self.positions.drain(..) {
+        let positions = std::mem::take(&mut self.positions);
+        let mut still_open = Vec::with_capacity(positions.len());
+        for position in positions {
             let ctx = StrategyContext::new("sniper", StrategySource::Sniper, state);
             let pair = format!("{}/{}", position.token0, position.token1);
-            let Some((reserve0, reserve1)) = read_reserves(position.pool, &state.provider).await
+            let Some((reserve0, reserve1)) = self
+                .read_reserves_paced(position.pool, &state.provider)
+                .await
             else {
                 ctx.decision(
                     pair,
@@ -406,6 +429,10 @@ fn reserve_retry_delay_ms(attempt: u32) -> Option<u64> {
     (1..RESERVE_RPC_MAX_ATTEMPTS)
         .contains(&attempt)
         .then(|| RESERVE_RPC_INITIAL_BACKOFF_MS << (attempt - 1))
+}
+
+fn reserve_spacing_delay_ms(elapsed_ms: u64) -> u64 {
+    RESERVE_RPC_MIN_SPACING_MS.saturating_sub(elapsed_ms)
 }
 
 fn v2_factory_supported(factory: Address, addresses: &crate::config::BaseAddresses) -> bool {
@@ -636,12 +663,20 @@ mod tests {
     }
 
     #[test]
-    fn reserve_retry_delays_are_bounded_and_exponential() {
+    fn reserve_retry_delays_are_bounded_and_public_rpc_friendly() {
         assert_eq!(reserve_retry_delay_ms(0), None);
-        assert_eq!(reserve_retry_delay_ms(1), Some(100));
-        assert_eq!(reserve_retry_delay_ms(2), Some(200));
+        assert_eq!(reserve_retry_delay_ms(1), Some(1_000));
+        assert_eq!(reserve_retry_delay_ms(2), Some(2_000));
         assert_eq!(reserve_retry_delay_ms(3), None);
         assert_eq!(reserve_retry_delay_ms(4), None);
+    }
+
+    #[test]
+    fn reserve_spacing_delay_enforces_one_second_minimum() {
+        assert_eq!(reserve_spacing_delay_ms(0), 1_000);
+        assert_eq!(reserve_spacing_delay_ms(250), 750);
+        assert_eq!(reserve_spacing_delay_ms(1_000), 0);
+        assert_eq!(reserve_spacing_delay_ms(1_500), 0);
     }
 
     #[test]
