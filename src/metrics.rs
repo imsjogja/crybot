@@ -31,6 +31,18 @@ pub struct Metrics {
     pub factory_logs_received: AtomicU64,
     /// Event factory yang berhasil didekode menjadi `NewPool`.
     pub pools_detected: AtomicU64,
+    /// Snapshot reserve V2 yang berhasil dipancarkan menjadi `PoolSync`.
+    pub pool_syncs_received: AtomicU64,
+    /// Kegagalan/timeout reserve poller V2.
+    pub pool_sync_errors: AtomicU64,
+    /// Transaksi confirmed dari target wallet yang dipancarkan ke strategy bus.
+    pub wallet_txs_received: AtomicU64,
+    /// Kegagalan/timeout saat listener wallet membaca head atau full block.
+    pub wallet_tx_errors: AtomicU64,
+    /// Price tick dari source harga pool yang berhasil dipancarkan.
+    pub price_ticks_received: AtomicU64,
+    /// Kegagalan validasi/poll/normalisasi source harga pool.
+    pub price_feed_errors: AtomicU64,
     /// Raw factory diagnostic logs yang topic0-nya bukan event factory dikenal.
     pub factory_unknown_logs: AtomicU64,
     pub skips: AtomicU64,
@@ -94,6 +106,12 @@ pub struct Snapshot {
     pub new_heads_received: u64,
     pub factory_logs_received: u64,
     pub pools_detected: u64,
+    pub pool_syncs_received: u64,
+    pub pool_sync_errors: u64,
+    pub wallet_txs_received: u64,
+    pub wallet_tx_errors: u64,
+    pub price_ticks_received: u64,
+    pub price_feed_errors: u64,
     pub factory_unknown_logs: u64,
     pub skips: u64,
     pub skip_rate_pct: f64,
@@ -155,6 +173,12 @@ impl Metrics {
             new_heads_received: self.new_heads_received.load(Ordering::Relaxed),
             factory_logs_received: self.factory_logs_received.load(Ordering::Relaxed),
             pools_detected: self.pools_detected.load(Ordering::Relaxed),
+            pool_syncs_received: self.pool_syncs_received.load(Ordering::Relaxed),
+            pool_sync_errors: self.pool_sync_errors.load(Ordering::Relaxed),
+            wallet_txs_received: self.wallet_txs_received.load(Ordering::Relaxed),
+            wallet_tx_errors: self.wallet_tx_errors.load(Ordering::Relaxed),
+            price_ticks_received: self.price_ticks_received.load(Ordering::Relaxed),
+            price_feed_errors: self.price_feed_errors.load(Ordering::Relaxed),
             factory_unknown_logs: self.factory_unknown_logs.load(Ordering::Relaxed),
             skips,
             skip_rate_pct: if total > 0 {
@@ -179,10 +203,16 @@ impl std::fmt::Display for Snapshot {
         let fmt_ms = |v: Option<i64>| v.map(|x| format!("{x} ms")).unwrap_or("-".into());
         write!(
             f,
-            "METRIK BASE | new_heads_received={} factory_logs_received={} pools_detected={} factory_unknown_logs={} orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} sign p95: {} submit p95: {}",
+            "METRIK BASE | new_heads_received={} factory_logs_received={} pools_detected={} pool_syncs_received={} pool_sync_errors={} wallet_txs_received={} wallet_tx_errors={} price_ticks_received={} price_feed_errors={} factory_unknown_logs={} orders={} fills={} errors={} risk_rej={} stale_rej={} sim_fail={} revert={} feed_gaps={} | e2e p50/p95/p99: {}/{}/{} | rpc p95: {} sim p95: {} sign p95: {} submit p95: {}",
             self.new_heads_received,
             self.factory_logs_received,
             self.pools_detected,
+            self.pool_syncs_received,
+            self.pool_sync_errors,
+            self.wallet_txs_received,
+            self.wallet_tx_errors,
+            self.price_ticks_received,
+            self.price_feed_errors,
             self.factory_unknown_logs,
             self.orders,
             self.follower_fills,
@@ -270,6 +300,12 @@ mod tests {
         assert_eq!(s.new_heads_received, 0);
         assert_eq!(s.factory_logs_received, 0);
         assert_eq!(s.pools_detected, 0);
+        assert_eq!(s.pool_syncs_received, 0);
+        assert_eq!(s.pool_sync_errors, 0);
+        assert_eq!(s.wallet_txs_received, 0);
+        assert_eq!(s.wallet_tx_errors, 0);
+        assert_eq!(s.price_ticks_received, 0);
+        assert_eq!(s.price_feed_errors, 0);
         assert_eq!(s.factory_unknown_logs, 0);
         let _ = s.to_string(); // Display tidak panic tanpa sampel
     }
@@ -281,11 +317,23 @@ mod tests {
         m.inc(&m.factory_logs_received);
         m.inc(&m.factory_logs_received);
         m.inc(&m.pools_detected);
+        m.inc(&m.pool_syncs_received);
+        m.inc(&m.pool_sync_errors);
+        m.inc(&m.wallet_txs_received);
+        m.inc(&m.wallet_tx_errors);
+        m.inc(&m.price_ticks_received);
+        m.inc(&m.price_feed_errors);
         m.inc(&m.factory_unknown_logs);
         let s = m.snapshot();
         assert_eq!(s.new_heads_received, 1);
         assert_eq!(s.factory_logs_received, 2);
         assert_eq!(s.pools_detected, 1);
+        assert_eq!(s.pool_syncs_received, 1);
+        assert_eq!(s.pool_sync_errors, 1);
+        assert_eq!(s.wallet_txs_received, 1);
+        assert_eq!(s.wallet_tx_errors, 1);
+        assert_eq!(s.price_ticks_received, 1);
+        assert_eq!(s.price_feed_errors, 1);
         assert_eq!(s.factory_unknown_logs, 1);
         assert_eq!(s.signals, 0);
         assert!(s.to_string().contains("factory_logs_received=2"));

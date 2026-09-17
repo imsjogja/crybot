@@ -20,7 +20,7 @@ pub mod r#yield;
 use std::collections::HashMap;
 
 use alloy::primitives::{Address, U256};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 use crate::config::{AppConfig, StrategiesCfg};
 use crate::events::{now_ms, LogEntry, MonitorMsg, StrategyEvent};
@@ -34,6 +34,7 @@ const SIGNAL_COOLDOWN_MS: i64 = 60_000;
 
 /// State global yang di-share ke semua strategi via trait `Strategy`.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct SharedState {
     /// Mode aplikasi; strategi paper-only harus menolaknya di luar paper.
     pub mode: crate::config::Mode,
@@ -56,6 +57,9 @@ pub struct SharedState {
     pub provider: alloy::providers::RootProvider,
     /// Metrics pipeline (blueprint §13) — sinyal yang lolos ambang dihitung di sini.
     pub metrics: SharedMetrics,
+    /// Sinyal shutdown global untuk worker strategi yang berjalan mandiri dari
+    /// loop dispatcher.
+    pub rx_shutdown: watch::Receiver<bool>,
 }
 
 /// Trait uniform untuk semua strategi.

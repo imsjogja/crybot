@@ -23,12 +23,14 @@ use alloy::rpc::types::Filter;
 use alloy::transports::http::reqwest::Url;
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
+use sqlx::SqlitePool;
 use tokio::sync::{mpsc, watch};
 
 use crate::config::{initial_log_lookback_range, BaseCfg};
 use crate::events::{now_ms, StrategyEvent};
 use crate::market::SharedMarketState;
 use crate::metrics::SharedMetrics;
+use crate::store::{clear_feed_cursor, load_feed_cursor, save_feed_cursor};
 
 /// topic0 PairCreated(address,address,address,uint256) — Uniswap V2 style.
 fn pair_created_topic() -> B256 {
@@ -65,6 +67,7 @@ fn is_flashblocks_endpoint(ws_url: &str) -> bool {
 /// polling — mencegah request `eth_getLogs` raksasa setelah feed tertinggal.
 const MAX_LOG_SCAN_BLOCKS: u64 = 100;
 const MAX_RAW_FACTORY_DIAGNOSTIC_KEYS: usize = 50;
+const MAX_WSS_CONSECUTIVE_FAILURES: u32 = 5;
 
 type RawFactoryDiagnosticKey = (Address, Option<B256>, usize, usize);
 
@@ -100,30 +103,33 @@ fn aggregate_raw_factory_logs(
     (logs.len(), unknown_logs, summary)
 }
 
-/// Menentukan rentang block `[from, to]` untuk pemindaian logs factory.
-/// Kunjungan pertama hanya memindai block terkini (tanpa backfill); rentang
-/// dibatasi `MAX_LOG_SCAN_BLOCKS`. `None` bila tidak ada yang perlu dipindai.
+/// Menentukan satu batch block `[from, to]` untuk pemindaian logs factory.
+/// Backlog tidak pernah dilompati: caller memanggil lagi sampai cursor mencapai
+/// head. Kunjungan pertama hanya memindai block terkini bila belum ada cursor.
 fn scan_window(last_scanned: Option<u64>, number: u64, no_factories: bool) -> Option<(u64, u64)> {
     if no_factories {
         return None;
     }
-    let from = match last_scanned {
-        Some(last) => {
-            let want = last + 1;
-            let clamped = want.max(number.saturating_sub(MAX_LOG_SCAN_BLOCKS));
-            if clamped > want {
-                // Backlog melebihi batas — block [want .. clamped-1] dilewati.
-                tracing::warn!(
-                    skipped_from = want,
-                    skipped_to = clamped - 1,
-                    "backlog logs factory melebihi {MAX_LOG_SCAN_BLOCKS} block — rentang dilewati"
-                );
-            }
-            clamped
-        }
-        None => number,
-    };
-    (from <= number).then_some((from, number))
+    let from = last_scanned
+        .map(|last| last.saturating_add(1))
+        .unwrap_or(number);
+    let to = from
+        .saturating_add(MAX_LOG_SCAN_BLOCKS.saturating_sub(1))
+        .min(number);
+    (from <= number).then_some((from, to))
+}
+
+/// Catat kegagalan sesi WSS tanpa menganggap satu head yang diterima sebagai
+/// pemulihan. Sesi yang terus putus setelah sempat menerima head tetap harus
+/// memakai backoff dan akhirnya menyerahkan feed ke HTTP.
+fn wss_failure_policy(
+    consecutive_failures: u32,
+    current_backoff: Duration,
+) -> (u32, Duration, bool) {
+    let failures = consecutive_failures.saturating_add(1);
+    let fallback_to_http = failures >= MAX_WSS_CONSECUTIVE_FAILURES;
+    let next_backoff = (current_backoff * 2).min(Duration::from_secs(30));
+    (failures, next_backoff, fallback_to_http)
 }
 
 /// Konektor read-only untuk RPC Base.
@@ -194,8 +200,21 @@ impl BaseConnector {
         tx_events: mpsc::Sender<StrategyEvent>,
         market: SharedMarketState,
         metrics: SharedMetrics,
+        cursor_pool: SqlitePool,
+        cursor_key: String,
         mut shutdown: watch::Receiver<bool>,
     ) {
+        let mut factory_cursor = match load_feed_cursor(&cursor_pool, &cursor_key).await {
+            Ok(cursor) => cursor,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    cursor_key,
+                    "event loop Base tidak dimulai: gagal membaca cursor factory SQLite"
+                );
+                return;
+            }
+        };
         let ws_url = self.config.ws_url.trim().to_string();
         if !ws_url.is_empty() {
             let mut backoff = Duration::from_secs(1);
@@ -211,6 +230,9 @@ impl BaseConnector {
                         &tx_events,
                         &market,
                         &metrics,
+                        &cursor_pool,
+                        &cursor_key,
+                        &mut factory_cursor,
                         &mut shutdown,
                         &mut received_head,
                     )
@@ -218,17 +240,20 @@ impl BaseConnector {
                 {
                     Ok(()) => return, // shutdown bersih
                     Err(e) => {
-                        if received_head {
-                            consecutive_failures = 0;
-                            backoff = Duration::from_secs(1);
-                            tracing::warn!(error = %e, "feed WSS terputus setelah menerima head — reconnect segera");
-                            continue;
-                        }
-                        consecutive_failures += 1;
-                        tracing::warn!(error = %e, consecutive_failures, "feed WSS terputus — reconnect {:?}", backoff);
-                        // Feed resilience (§4): bila WSS gagal terus-menerus,
-                        // jatuh permanen ke polling HTTP agar feed tidak mati.
-                        if consecutive_failures >= 5 {
+                        let (failures, next_backoff, fallback_to_http) =
+                            wss_failure_policy(consecutive_failures, backoff);
+                        consecutive_failures = failures;
+                        tracing::warn!(
+                            error = %e,
+                            consecutive_failures,
+                            received_head,
+                            retry_after = ?backoff,
+                            "feed WSS terputus; reconnect dengan backoff"
+                        );
+                        // Feed resilience (§4): sesi yang sempat menerima head
+                        // tetapi terus putus juga harus gagal ke HTTP, bukan
+                        // reconnect ketat tanpa batas.
+                        if fallback_to_http {
                             tracing::error!(
                                 "WSS gagal {consecutive_failures}x berturut — fallback permanen ke polling HTTP"
                             );
@@ -238,7 +263,7 @@ impl BaseConnector {
                             _ = tokio::time::sleep(backoff) => {}
                             _ = shutdown.changed() => return,
                         }
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                        backoff = next_backoff;
                     }
                 }
             }
@@ -248,17 +273,29 @@ impl BaseConnector {
                  memerlukan endpoint WSS; jatuh ke polling HTTP"
             );
         }
-        self.run_http_polling(tx_events, market, metrics, shutdown)
-            .await;
+        self.run_http_polling(
+            tx_events,
+            market,
+            metrics,
+            cursor_pool,
+            cursor_key,
+            factory_cursor,
+            shutdown,
+        )
+        .await;
     }
 
     /// Feed WSS: newHeads -> NewBlock (+gas state), logs factory -> NewPool.
+    #[allow(clippy::too_many_arguments)]
     async fn run_ws_loop(
         &self,
         ws_url: &str,
         tx_events: &mpsc::Sender<StrategyEvent>,
         market: &SharedMarketState,
         metrics: &SharedMetrics,
+        cursor_pool: &SqlitePool,
+        cursor_key: &str,
+        factory_cursor: &mut Option<u64>,
         shutdown: &mut watch::Receiver<bool>,
         received_head: &mut bool,
     ) -> Result<()> {
@@ -276,7 +313,8 @@ impl BaseConnector {
 
         // Filter logs: factory PoolCreated/PairCreated.
         let factories = self.factory_addresses();
-        let mut logs = if factories.is_empty() {
+        let no_factories = factories.is_empty();
+        let mut logs = if no_factories {
             None
         } else {
             let filter = Filter::new().address(factories).event_signature(vec![
@@ -298,50 +336,67 @@ impl BaseConnector {
             .get_block_number()
             .await
             .context("gagal mengambil head WSS untuk backfill factory logs")?;
-        let last_market_block = market
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .block_number;
-        if last_market_block == 0 {
-            if let Some((from, to)) =
-                initial_log_lookback_range(current, self.config.initial_log_lookback_blocks)
-            {
-                tracing::info!(
-                    from,
-                    to,
-                    lookback_blocks = self.config.initial_log_lookback_blocks,
-                    "memindai startup lookback factory logs WSS"
-                );
-                let completed = self
-                    .scan_factory_logs(from, to, tx_events, market, metrics, shutdown)
-                    .await
-                    .context("gagal memindai startup lookback factory logs WSS")?;
-                tracing::info!(
-                    from,
-                    to,
-                    completed,
-                    "startup lookback factory logs WSS selesai"
-                );
-                if !completed {
-                    return Ok(());
+        if factory_cursor.is_some_and(|cursor| cursor > current) {
+            tracing::warn!(
+                cursor = ?factory_cursor,
+                current,
+                cursor_key,
+                "cursor factory lebih tinggi dari head RPC; reset checkpoint kemungkinan jaringan berubah"
+            );
+            clear_feed_cursor(cursor_pool, cursor_key)
+                .await
+                .context("gagal reset cursor factory yang tidak valid")?;
+            *factory_cursor = None;
+        }
+
+        let mut startup_lookback = None;
+        if factory_cursor.is_none() {
+            match initial_log_lookback_range(current, self.config.initial_log_lookback_blocks) {
+                Some((from, to)) => {
+                    *factory_cursor = Some(from.saturating_sub(1));
+                    startup_lookback = Some((from, to));
+                    tracing::info!(
+                        from,
+                        to,
+                        lookback_blocks = self.config.initial_log_lookback_blocks,
+                        "memulai backfill cursor factory logs WSS"
+                    );
                 }
-                if self.config.raw_factory_diagnostics {
-                    self.scan_raw_factory_diagnostics(from, to, metrics)
+                None => {
+                    // Konfigurasi eksplisit tanpa lookback tetap harus membuat
+                    // checkpoint agar restart tidak mengulang seluruh chain.
+                    save_feed_cursor(cursor_pool, cursor_key, current)
                         .await
-                        .context("gagal memindai diagnostik raw factory logs saat startup WSS")?;
+                        .context("gagal menyimpan cursor factory awal tanpa lookback")?;
+                    *factory_cursor = Some(current);
+                    tracing::info!(
+                        cursor_block = current,
+                        "lookback factory logs dinonaktifkan; cursor dimulai dari head saat ini"
+                    );
                 }
             }
-        } else if last_market_block < current {
-            self.scan_factory_logs(
-                last_market_block + 1,
-                current,
-                tx_events,
-                market,
-                metrics,
-                shutdown,
-            )
-            .await
-            .context("gagal backfill factory logs setelah koneksi WSS")?;
+        }
+
+        while let Some((from, to)) = scan_window(*factory_cursor, current, no_factories) {
+            let completed = self
+                .scan_factory_logs(from, to, tx_events, market, metrics, shutdown)
+                .await
+                .context("gagal backfill factory logs setelah koneksi WSS")?;
+            if !completed {
+                return Ok(());
+            }
+            save_feed_cursor(cursor_pool, cursor_key, to)
+                .await
+                .context("gagal menyimpan cursor factory logs WSS")?;
+            *factory_cursor = Some(to);
+            tracing::debug!(from, to, "batch backfill cursor factory logs WSS selesai");
+        }
+        if let Some((from, to)) = startup_lookback {
+            if self.config.raw_factory_diagnostics {
+                self.scan_raw_factory_diagnostics(from, to, metrics)
+                    .await
+                    .context("gagal memindai diagnostik raw factory logs saat startup WSS")?;
+            }
         }
 
         let mut last_heartbeat_ms = 0;
@@ -489,22 +544,19 @@ impl BaseConnector {
 
     /// Feed polling HTTP (fallback) — NewBlock + pemindaian logs factory
     /// (`eth_getLogs`) agar `NewPool` tetap mengalir tanpa WSS.
+    #[allow(clippy::too_many_arguments)]
     async fn run_http_polling(
         &self,
         tx_events: mpsc::Sender<StrategyEvent>,
         market: SharedMarketState,
         metrics: SharedMetrics,
+        cursor_pool: SqlitePool,
+        cursor_key: String,
+        mut last_scanned: Option<u64>,
         mut shutdown: watch::Receiver<bool>,
     ) {
         let mut last_block = None;
         let mut last_heartbeat_ms = 0;
-        let mut last_scanned = {
-            let block = market
-                .read()
-                .unwrap_or_else(|e| e.into_inner())
-                .block_number;
-            (block > 0).then_some(block)
-        };
         let no_factories = self.factory_addresses().is_empty();
         let mut poll_interval =
             tokio::time::interval(Duration::from_millis(self.config.poll_interval_ms));
@@ -523,6 +575,25 @@ impl BaseConnector {
                     match self.get_block_number().await {
                         Ok(number) => {
                             metrics.record_rpc_latency(now_ms() - rpc_start);
+                            if last_scanned.is_some_and(|cursor| cursor > number) {
+                                tracing::warn!(
+                                    cursor = ?last_scanned,
+                                    number,
+                                    cursor_key,
+                                    "cursor factory lebih tinggi dari head RPC; reset checkpoint kemungkinan jaringan berubah"
+                                );
+                                match clear_feed_cursor(&cursor_pool, &cursor_key).await {
+                                    Ok(()) => last_scanned = None,
+                                    Err(error) => {
+                                        tracing::error!(
+                                            %error,
+                                            cursor_key,
+                                            "event loop HTTP berhenti: gagal reset cursor factory yang tidak valid"
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
                             if last_block != Some(number) {
                                 let ts_ms = now_ms();
                                 let gap = {
@@ -554,29 +625,46 @@ impl BaseConnector {
                                 }
                                 last_block = Some(number);
                                 tracing::debug!(block = number, "block Base baru terdeteksi");
+                            }
 
-                                if let Some((from, to)) =
-                                    scan_window(last_scanned, number, no_factories)
+                            // Jalankan satu batch setiap tick, bahkan jika
+                            // head belum berubah, agar backlog cursor pulih
+                            // deterministik tanpa melompati rentang lama.
+                            if let Some((from, to)) =
+                                scan_window(last_scanned, number, no_factories)
+                            {
+                                match self
+                                    .scan_factory_logs(
+                                        from,
+                                        to,
+                                        &tx_events,
+                                        &market,
+                                        &metrics,
+                                        &mut shutdown,
+                                    )
+                                    .await
                                 {
-                                    match self
-                                        .scan_factory_logs(
-                                            from,
-                                            to,
-                                            &tx_events,
-                                            &market,
-                                            &metrics,
-                                            &mut shutdown,
-                                        )
-                                        .await
-                                    {
-                                        Ok(true) => last_scanned = Some(to),
-                                        Ok(false) => break,
-                                        Err(error) => {
-                                            tracing::warn!(
-                                                %error, from, to,
-                                                "gagal polling logs factory — dicoba lagi tick berikutnya"
+                                    Ok(true) => {
+                                        if let Err(error) =
+                                            save_feed_cursor(&cursor_pool, &cursor_key, to).await
+                                        {
+                                            tracing::error!(
+                                                %error,
+                                                from,
+                                                to,
+                                                cursor_key,
+                                                "event loop HTTP berhenti: gagal menyimpan cursor factory"
                                             );
+                                            break;
                                         }
+                                        last_scanned = Some(to);
+                                    }
+                                    Ok(false) => break,
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error, from, to,
+                                            "gagal polling logs factory — dicoba lagi tick berikutnya"
+                                        );
                                     }
                                 }
                             }
@@ -881,11 +969,11 @@ mod tests {
     }
 
     #[test]
-    fn scan_window_dibatasi_rentang_maksimum() {
+    fn scan_window_dibatasi_tanpa_melompati_backlog() {
         let number = MAX_LOG_SCAN_BLOCKS + 51;
         assert_eq!(
             scan_window(Some(1), number, false),
-            Some((number - MAX_LOG_SCAN_BLOCKS, number))
+            Some((2, MAX_LOG_SCAN_BLOCKS + 1))
         );
     }
 
@@ -893,5 +981,21 @@ mod tests {
     fn scan_window_kosong_tanpa_factory_atau_block_baru() {
         assert_eq!(scan_window(Some(5), 5, false), None);
         assert_eq!(scan_window(None, 10, true), None);
+    }
+
+    #[test]
+    fn repeated_wss_failure_after_heads_still_reaches_http_fallback() {
+        let mut failures = 0;
+        let mut backoff = Duration::from_secs(1);
+        for _ in 0..MAX_WSS_CONSECUTIVE_FAILURES - 1 {
+            let (next_failures, next_backoff, fallback) = wss_failure_policy(failures, backoff);
+            failures = next_failures;
+            backoff = next_backoff;
+            assert!(!fallback);
+        }
+        let (failures, backoff, fallback) = wss_failure_policy(failures, backoff);
+        assert_eq!(failures, MAX_WSS_CONSECUTIVE_FAILURES);
+        assert_eq!(backoff, Duration::from_secs(30));
+        assert!(fallback);
     }
 }

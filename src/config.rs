@@ -38,11 +38,17 @@ impl Mode {
     pub fn is_paper(&self) -> bool {
         matches!(self, Mode::Paper)
     }
-    /// Chain ID Base Network (mainnet=8453, testnet/sepolia=84532).
-    pub fn base_chain_id(&self) -> u64 {
+
+    /// Chain ID Base yang wajib dipakai untuk mode yang dapat broadcast.
+    ///
+    /// Paper mode sengaja tidak memaksa chain tertentu: model read-only saat
+    /// ini boleh membaca state mainnet. Testnet dan live harus diverifikasi
+    /// terhadap RPC sebelum task apa pun dimulai.
+    pub fn expected_base_chain_id(&self) -> Option<u64> {
         match self {
-            Mode::Live => 8453,
-            _ => 84532,
+            Mode::Paper => None,
+            Mode::Testnet => Some(84532),
+            Mode::Live => Some(8453),
         }
     }
 }
@@ -191,6 +197,27 @@ impl AppConfig {
         let cfg: AppConfig = serde_yaml::from_str(&raw).context("config.yaml tidak valid")?;
         Ok(cfg)
     }
+
+    /// Fail closed berdasarkan kemampuan aplikasi yang benar-benar tersedia.
+    ///
+    /// Executor Base sudah ada, tetapi revisi ini belum memiliki producer
+    /// `BaseOrder` dari strategi mana pun. Mengizinkan startup non-paper dalam
+    /// keadaan armed akan memberi kesan keliru bahwa bot dapat berdagang.
+    /// Guard ini harus dipersempit/dihapus hanya setelah jalur order
+    /// production-ready (quote, calldata, simulation, dan test end-to-end)
+    /// benar-benar ditambahkan.
+    pub fn validate_current_capabilities(&self) -> Result<()> {
+        if !self.mode.is_paper() && self.risk.armed {
+            anyhow::bail!(
+                "mode {:?} dengan risk.armed=true belum didukung: tidak ada producer \
+                 BaseOrder production-ready. Tetapkan risk.armed=false sampai jalur \
+                 strategi → quote/calldata → risk → execution telah diimplementasikan \
+                 dan diuji end-to-end",
+                self.mode
+            );
+        }
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -211,6 +238,18 @@ pub struct BaseCfg {
     /// Interval polling block HTTP fallback (ms) bila WSS tidak tersedia.
     #[serde(default = "default_poll_interval_ms")]
     pub poll_interval_ms: u64,
+    /// Interval reserve polling untuk pool V2-compatible yang baru terdeteksi.
+    ///
+    /// Poller ini memancarkan `StrategyEvent::PoolSync` sehingga market state,
+    /// scoring, dan strategi observasional mendapat input nyata. Concentrated
+    /// liquidity (V3/Slipstream) belum termasuk karena tidak memiliki ABI
+    /// `getReserves()` V2.
+    #[serde(default = "default_pool_sync_poll_interval_ms")]
+    pub pool_sync_poll_interval_ms: u64,
+    /// Maksimum pool V2 yang dibaca dalam satu tick poller reserve.
+    /// Dibatasi saat runtime untuk menjaga RPC publik dari burst berlebihan.
+    #[serde(default = "default_pool_sync_batch_size")]
+    pub pool_sync_batch_size: usize,
     /// Umur maksimum market state sebelum dianggap stale (ms) —
     /// blueprint §4.3 freshness guard.
     #[serde(default = "default_stale_ms")]
@@ -336,6 +375,14 @@ fn default_poll_interval_ms() -> u64 {
     1_000
 }
 
+fn default_pool_sync_poll_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_pool_sync_batch_size() -> usize {
+    1
+}
+
 fn default_stale_ms() -> i64 {
     crate::market::DEFAULT_STALE_MS
 }
@@ -358,6 +405,18 @@ pub struct StrategiesCfg {
     pub sniper: SniperCfg,
     #[serde(default)]
     pub copy_onchain: CopyOnChainCfg,
+    /// Source harga yang menghasilkan `PriceTick`.
+    ///
+    /// Harga dinormalisasi sebagai `quote_token per base_token`. V2 memakai
+    /// reserve, sedangkan V3 dan Slipstream memakai `slot0.sqrtPriceX96`.
+    #[serde(default)]
+    pub price_feeds: Vec<PriceFeedCfg>,
+    /// Interval poll source harga (ms).
+    #[serde(default = "default_price_feed_poll_interval_ms")]
+    pub price_feed_poll_interval_ms: u64,
+    /// Maksimum source harga yang dibaca setiap tick poller.
+    #[serde(default = "default_price_feed_batch_size")]
+    pub price_feed_batch_size: usize,
     #[serde(default)]
     pub grid_dca: GridDcaCfg,
     #[serde(default)]
@@ -366,6 +425,50 @@ pub struct StrategiesCfg {
     pub yield_farming: YieldCfg,
     #[serde(default)]
     pub perps: PerpsCfg,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PriceFeedCfg {
+    /// Jenis ABI pool sumber harga.
+    #[serde(default)]
+    pub kind: PriceFeedKind,
+    /// ID pair yang diteruskan apa adanya ke `StrategyEvent::PriceTick`.
+    pub pair: String,
+    /// Pool sumber harga; ABI dipilih oleh `kind`.
+    pub pool: Address,
+    /// Denominator harga; nilai tick adalah quote per satu base.
+    pub base_token: Address,
+    /// Numerator harga; nilai tick adalah quote per satu base.
+    pub quote_token: Address,
+    #[serde(default = "default_token_decimals")]
+    pub base_decimals: u32,
+    #[serde(default = "default_token_decimals")]
+    pub quote_decimals: u32,
+}
+
+/// ABI sumber harga yang didukung oleh poller `PriceTick`.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PriceFeedKind {
+    /// Pool dengan `getReserves()` (Uniswap V2-compatible).
+    #[default]
+    V2,
+    /// Pool Uniswap V3 dengan `slot0()` tujuh return value.
+    UniswapV3,
+    /// Pool Aerodrome Slipstream dengan `slot0()` enam return value.
+    AerodromeSlipstream,
+}
+
+fn default_price_feed_poll_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_price_feed_batch_size() -> usize {
+    1
+}
+
+fn default_token_decimals() -> u32 {
+    18
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -461,6 +564,12 @@ pub struct CopyOnChainCfg {
     pub enabled: bool,
     #[serde(default)]
     pub target_wallets: Vec<WalletTargetCfg>,
+    /// Interval listener transaksi confirmed dari target wallet (ms).
+    ///
+    /// Worker dibatasi minimum saat runtime, hanya membaca block baru, dan
+    /// tidak pernah membuat order. Backfill cursor persisten belum tersedia.
+    #[serde(default = "default_wallet_tx_poll_interval_ms")]
+    pub wallet_tx_poll_interval_ms: u64,
     #[serde(default = "default_slippage_bps")]
     pub slippage_bps: u32,
     #[serde(default)]
@@ -478,6 +587,7 @@ impl Default for CopyOnChainCfg {
         Self {
             enabled: false,
             target_wallets: Vec::new(),
+            wallet_tx_poll_interval_ms: default_wallet_tx_poll_interval_ms(),
             slippage_bps: default_slippage_bps(),
             sizing: SizingModel::FixedRatio,
             copy_ratio: default_copy_ratio(),
@@ -485,6 +595,10 @@ impl Default for CopyOnChainCfg {
             max_tx_eth: default_max_tx_eth(),
         }
     }
+}
+
+fn default_wallet_tx_poll_interval_ms() -> u64 {
+    1_000
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -672,7 +786,10 @@ pub struct PerpsPositionCfg {
 
 #[cfg(test)]
 mod tests {
-    use super::{initial_log_lookback_range, BaseAddresses, BaseCfg};
+    use super::{
+        initial_log_lookback_range, AppConfig, BaseAddresses, BaseCfg, Mode, PriceFeedCfg,
+        PriceFeedKind,
+    };
 
     #[test]
     fn base_config_defaults_raw_factory_diagnostics_to_true() {
@@ -711,5 +828,66 @@ mod tests {
             cfg.paper_simulation.entry_exit_gas_eth,
             rust_decimal::Decimal::new(1, 4)
         );
+    }
+
+    #[test]
+    fn price_feed_kind_defaults_to_v2_and_parses_concentrated_pool_variants() {
+        let default_feed: PriceFeedCfg = serde_yaml::from_str(
+            "pair: WETH/USDC\npool: \"0x0000000000000000000000000000000000000001\"\nbase_token: \"0x0000000000000000000000000000000000000002\"\nquote_token: \"0x0000000000000000000000000000000000000003\"\n",
+        )
+        .unwrap();
+        assert_eq!(default_feed.kind, PriceFeedKind::V2);
+
+        let v3: PriceFeedCfg = serde_yaml::from_str(
+            "kind: uniswap_v3\npair: WETH/USDC\npool: \"0x0000000000000000000000000000000000000001\"\nbase_token: \"0x0000000000000000000000000000000000000002\"\nquote_token: \"0x0000000000000000000000000000000000000003\"\n",
+        )
+        .unwrap();
+        assert_eq!(v3.kind, PriceFeedKind::UniswapV3);
+
+        let slipstream: PriceFeedCfg = serde_yaml::from_str(
+            "kind: aerodrome_slipstream\npair: WETH/USDC\npool: \"0x0000000000000000000000000000000000000001\"\nbase_token: \"0x0000000000000000000000000000000000000002\"\nquote_token: \"0x0000000000000000000000000000000000000003\"\n",
+        )
+        .unwrap();
+        assert_eq!(slipstream.kind, PriceFeedKind::AerodromeSlipstream);
+    }
+
+    #[test]
+    fn only_broadcast_modes_require_a_specific_base_chain() {
+        assert_eq!(Mode::Paper.expected_base_chain_id(), None);
+        assert_eq!(Mode::Testnet.expected_base_chain_id(), Some(84532));
+        assert_eq!(Mode::Live.expected_base_chain_id(), Some(8453));
+    }
+
+    #[test]
+    fn armed_non_paper_startup_is_rejected_until_order_producer_exists() {
+        let yaml = r#"
+mode: testnet
+risk:
+  daily_loss_limit_pct: 3
+  kill_switch_drawdown_pct: 10
+  armed: true
+monitor:
+  telegram_bot_token_env: TG_TOKEN
+  telegram_chat_id_env: TG_CHAT
+  alert_on_fill: false
+store:
+  sqlite_path: /tmp/crybot-config-test.db
+base:
+  ws_url: wss://example.test
+  http_url: https://example.test
+  mev_rpc_url: null
+  private_key_env: BASE_PRIVATE_KEY
+"#;
+        let cfg: AppConfig = serde_yaml::from_str(yaml).expect("config valid");
+
+        assert!(cfg.validate_current_capabilities().is_err());
+
+        let mut disarmed = cfg.clone();
+        disarmed.risk.armed = false;
+        assert!(disarmed.validate_current_capabilities().is_ok());
+
+        let mut paper = cfg;
+        paper.mode = Mode::Paper;
+        assert!(paper.validate_current_capabilities().is_ok());
     }
 }

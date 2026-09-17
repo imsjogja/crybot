@@ -3,34 +3,34 @@
 //! Calldata tidak dibuat atau diubah. Hanya calldata non-kosong dari router dan
 //! selector yang didukung serta nilai copy 1:1 yang dapat diantrikan ke executor.
 
-use std::collections::HashSet;
-
 use alloy::primitives::Address;
 use rust_decimal::Decimal;
 
 use crate::config::{CopyOnChainCfg, WalletTargetCfg};
 use crate::events::{MonitorMsg, StrategyEvent, StrategySource};
 
-use super::common::StrategyContext;
+use super::common::{BoundedDedup, StrategyContext};
 use super::{SharedState, Strategy};
+
+const MAX_SEEN_TX_HASHES: usize = 10_000;
 
 /// Strategi pengamat transaksi target wallet dengan deduplikasi hash transaksi.
 pub struct CopyOnChainStrategy {
     cfg: CopyOnChainCfg,
-    seen_tx_hashes: HashSet<String>,
+    seen_tx_hashes: BoundedDedup<String>,
 }
 
 impl CopyOnChainStrategy {
     pub fn new(cfg: CopyOnChainCfg) -> Self {
         Self {
             cfg,
-            seen_tx_hashes: HashSet::new(),
+            seen_tx_hashes: BoundedDedup::new(MAX_SEEN_TX_HASHES),
         }
     }
 
     fn tx_is_new(&mut self, tx_hash: &str) -> bool {
         self.seen_tx_hashes
-            .insert(tx_hash.trim().to_ascii_lowercase())
+            .insert_if_new(tx_hash.trim().to_ascii_lowercase())
     }
 }
 

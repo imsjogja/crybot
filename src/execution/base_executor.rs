@@ -189,6 +189,21 @@ impl BaseExecutor {
         self.paper_mode
     }
 
+    /// Pastikan RPC yang dipakai sesuai mode broadcast yang dipilih operator.
+    ///
+    /// Tanpa validasi ini, `mode: testnet` dengan URL RPC mainnet tetap akan
+    /// menandatangani dan mengirim transaksi ke chain yang dilaporkan endpoint.
+    /// Tidak dipanggil pada paper mode karena paper model saat ini membaca
+    /// state mainnet secara read-only.
+    pub async fn verify_chain_id(&self, expected_chain_id: u64) -> Result<()> {
+        let actual_chain_id = self
+            .provider
+            .get_chain_id()
+            .await
+            .context("gagal mengambil chain ID dari Base RPC")?;
+        ensure_expected_chain_id(actual_chain_id, expected_chain_id)
+    }
+
     /// Ambil saldo ETH signer (dalam wei).
     ///
     /// # Errors
@@ -386,6 +401,15 @@ enum ReceiptOutcome {
     Confirmed,
     Reverted,
     Timeout,
+}
+
+fn ensure_expected_chain_id(actual_chain_id: u64, expected_chain_id: u64) -> Result<()> {
+    anyhow::ensure!(
+        actual_chain_id == expected_chain_id,
+        "chain ID RPC tidak sesuai: mendapat {actual_chain_id}, mengharapkan \
+         {expected_chain_id}. Periksa mode dan base.http_url sebelum melanjutkan"
+    );
+    Ok(())
 }
 
 // ============================================================================
@@ -661,4 +685,15 @@ async fn emit_swap_event(
         )),
     };
     let _ = tx_monitor.send(message).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_expected_chain_id;
+
+    #[test]
+    fn rejects_rpc_chain_that_does_not_match_selected_mode() {
+        assert!(ensure_expected_chain_id(84532, 84532).is_ok());
+        assert!(ensure_expected_chain_id(8453, 84532).is_err());
+    }
 }

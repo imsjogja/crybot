@@ -9,6 +9,10 @@ use tokio::sync::{mpsc, watch};
 
 use crypto_copy_bot::config::AppConfig;
 use crypto_copy_bot::connectors::base::BaseConnector;
+use crypto_copy_bot::connectors::pool_sync::run_v2_reserve_poller;
+use crypto_copy_bot::connectors::price::run_price_poller;
+use crypto_copy_bot::connectors::scheduler::{run_compound_scheduler, run_dca_scheduler};
+use crypto_copy_bot::connectors::wallet_tx::run_wallet_tx_listener;
 use crypto_copy_bot::events::{LogEntry, MonitorMsg, StrategyEvent};
 use crypto_copy_bot::execution::base_executor::{run_base_execution, BaseExecutor, BaseOrder};
 use crypto_copy_bot::market::new_shared_market_state;
@@ -39,6 +43,7 @@ async fn main() -> Result<()> {
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("config/config.yaml"));
     let cfg = AppConfig::load(&cfg_path)?;
+    cfg.validate_current_capabilities()?;
     if !cfg.mode.is_paper() && !cfg.simulation.pre_submit {
         anyhow::bail!("simulation.pre_submit wajib true di mode non-paper");
     }
@@ -64,7 +69,16 @@ async fn main() -> Result<()> {
 
     // Base components
     let connector = BaseConnector::new(&cfg.base)?;
+    let pool_sync_provider = connector.provider().clone();
+    let wallet_tx_provider = connector.provider().clone();
+    let price_feed_provider = connector.provider().clone();
     let executor = BaseExecutor::new(&cfg.base, cfg.mode.is_paper())?;
+    if let Some(expected_chain_id) = cfg.mode.expected_base_chain_id() {
+        executor
+            .verify_chain_id(expected_chain_id)
+            .await
+            .context("RPC Base tidak cocok dengan mode aplikasi")?;
+    }
     let wallet_address = executor.signer_address();
     // Blueprint §8: simulasi eth_call pre-submit (paper dan live).
     let simulator = if cfg.simulation.pre_submit {
@@ -76,6 +90,28 @@ async fn main() -> Result<()> {
         None
     };
     let pool = store::init_pool(&cfg.store.sqlite_path).await?;
+    let stale_at_ms = crypto_copy_bot::events::now_ms();
+    let stale_paper_positions = store::mark_open_paper_positions_stale(&pool, stale_at_ms)
+        .await
+        .context("gagal menandai posisi paper lama sebagai stale")?;
+    if stale_paper_positions > 0 {
+        tracing::warn!(
+            stale_paper_positions,
+            "posisi paper open dari process sebelumnya ditandai stale; tidak dipulihkan"
+        );
+        let _ = tx_log
+            .send(LogEntry {
+                ts_ms: stale_at_ms,
+                kind: "paper_positions_marked_stale".into(),
+                payload: serde_json::json!({
+                    "count": stale_paper_positions,
+                    "reason": "stale_after_restart",
+                    "paper_only": true,
+                })
+                .to_string(),
+            })
+            .await;
+    }
 
     let shared = SharedState {
         mode: cfg.mode,
@@ -88,6 +124,7 @@ async fn main() -> Result<()> {
         tx_base_order,
         provider: connector.provider().clone(),
         metrics: metrics.clone(),
+        rx_shutdown: rx_shutdown.clone(),
     };
     let strategy_engine = StrategyEngine::new(&cfg, rx_strategy_event, shared);
 
@@ -101,16 +138,79 @@ async fn main() -> Result<()> {
     let base_shutdown = rx_shutdown.clone();
     let connector_market = market.clone();
     let connector_metrics = metrics.clone();
+    let tx_pool_sync_events = tx_strategy_event.clone();
+    let tx_wallet_events = tx_strategy_event.clone();
+    let tx_dca_events = tx_strategy_event.clone();
+    let tx_compound_events = tx_strategy_event.clone();
+    let tx_price_events = tx_strategy_event.clone();
+    let base_cursor_pool = pool.clone();
+    let base_cursor_key = format!("base_factory_logs:{:?}", cfg.mode).to_ascii_lowercase();
+    let wallet_cursor_pool = pool.clone();
+    let wallet_cursor_key = format!("wallet_tx_confirmed:{:?}", cfg.mode).to_ascii_lowercase();
     handles.push(tokio::spawn(async move {
         connector
             .run_event_loop(
                 tx_strategy_event,
                 connector_market,
                 connector_metrics,
+                base_cursor_pool,
+                base_cursor_key,
                 base_shutdown,
             )
             .await;
     }));
+
+    handles.push(tokio::spawn(run_v2_reserve_poller(
+        pool_sync_provider,
+        market.clone(),
+        tx_pool_sync_events,
+        metrics.clone(),
+        cfg.base.pool_sync_poll_interval_ms,
+        cfg.base.pool_sync_batch_size,
+        rx_shutdown.clone(),
+    )));
+
+    if cfg.strategies.copy_onchain.enabled {
+        handles.push(tokio::spawn(run_wallet_tx_listener(
+            wallet_tx_provider,
+            cfg.strategies.copy_onchain.target_wallets.clone(),
+            tx_wallet_events,
+            metrics.clone(),
+            wallet_cursor_pool,
+            wallet_cursor_key,
+            cfg.strategies.copy_onchain.wallet_tx_poll_interval_ms,
+            rx_shutdown.clone(),
+        )));
+    }
+
+    if !cfg.strategies.price_feeds.is_empty() {
+        handles.push(tokio::spawn(run_price_poller(
+            price_feed_provider,
+            cfg.strategies.price_feeds.clone(),
+            tx_price_events,
+            metrics.clone(),
+            cfg.strategies.price_feed_poll_interval_ms,
+            cfg.strategies.price_feed_batch_size,
+            rx_shutdown.clone(),
+        )));
+    }
+
+    if cfg.strategies.grid_dca.enabled {
+        handles.push(tokio::spawn(run_dca_scheduler(
+            cfg.strategies.grid_dca.dca_plans.clone(),
+            tx_dca_events,
+            rx_shutdown.clone(),
+        )));
+    }
+
+    if cfg.strategies.yield_farming.enabled {
+        handles.push(tokio::spawn(run_compound_scheduler(
+            cfg.strategies.yield_farming.positions.clone(),
+            cfg.strategies.yield_farming.auto_compound_interval_hours,
+            tx_compound_events,
+            rx_shutdown.clone(),
+        )));
+    }
 
     handles.push(tokio::spawn(run_base_execution(
         rx_base_order,
@@ -197,6 +297,13 @@ async fn main() -> Result<()> {
             cfg.mode, cfg.base.http_url, cfg.risk.armed
         )))
         .await;
+    if stale_paper_positions > 0 {
+        let _ = tx_monitor
+            .send(MonitorMsg::Warning(format!(
+                "PAPER MODEL: {stale_paper_positions} posisi sesi sebelumnya ditandai stale setelah restart; tidak dihitung sebagai PnL realized"
+            )))
+            .await;
+    }
 
     tracing::info!("semua komponen berjalan — Ctrl+C untuk berhenti");
 

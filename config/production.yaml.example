@@ -33,6 +33,10 @@ base:
   http_url: "https://mainnet.base.org"
   flashblocks: true
   mev_rpc_url: null
+  # Poll reserve V2-compatible -> PoolSync. Default satu pool/detik agar
+  # aman untuk endpoint RPC publik; tingkatkan hanya setelah ukur rate limit.
+  pool_sync_poll_interval_ms: 1000
+  pool_sync_batch_size: 1
   private_key_env: BASE_PRIVATE_KEY
 
 strategies:
@@ -57,12 +61,22 @@ strategies:
 
   copy_onchain:
     enabled: false
+    # Memantau transaksi confirmed dari wallet target; tetap observe-only,
+    # tidak membuat BaseOrder atau broadcast transaksi.
+    wallet_tx_poll_interval_ms: 1000
     slippage_bps: 300
     sizing: fixed_ratio
     copy_ratio: "0.1"
     min_tx_eth: "0.01"
     max_tx_eth: "1.0"
     target_wallets: []
+
+  # Source harga yang mengirim PriceTick. Harga selalu quote_token per
+  # base_token setelah normalisasi decimals. `kind` dapat berupa v2,
+  # uniswap_v3, atau aerodrome_slipstream; daftar default tetap kosong.
+  price_feed_poll_interval_ms: 1000
+  price_feed_batch_size: 1
+  price_feeds: []
 
   grid_dca:
     enabled: false

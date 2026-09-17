@@ -29,7 +29,7 @@ RUN touch src/main.rs src/lib.rs && cargo build --release
 # =========================================================================
 FROM debian:bookworm-slim
 
-# ca-certificates: TLS ke Binance/Telegram | tzdata: timestamp log benar
+# ca-certificates: TLS ke Base RPC/Telegram | tzdata: timestamp log benar
 # procps: pgrep untuk healthcheck | chrony opsional (host yang sebaiknya sync NTP)
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata procps \

@@ -57,9 +57,9 @@ pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics, risk: &SharedRis
         Mode::Live => "💵 LIVE",
     };
     let exec_label = if info.armed {
-        "✅ AKTIF"
+        "⛔ DIBLOKIR — belum ada producer BaseOrder"
     } else {
-        "🔒 NONAKTIF (aman)"
+        "🔒 NONAKTIF — aplikasi belum siap broadcast"
     };
     let halt_label = if risk.is_halted() {
         "⛔ HALT AKTIF — BUY diblokir"

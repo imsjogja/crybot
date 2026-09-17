@@ -5,6 +5,25 @@
 use alloy_sol_types::sol;
 
 sol! {
+    /// Pool concentrated-liquidity Aerodrome Slipstream untuk pembacaan spot
+    /// price. Berbeda dari Uniswap V3 karena `slot0()` tidak memiliki
+    /// return value `feeProtocol`.
+    #[derive(Debug, PartialEq)]
+    interface ISlipstreamPool {
+        function token0() external view returns (address);
+        function token1() external view returns (address);
+        function slot0() external view returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            bool unlocked
+        );
+    }
+}
+
+sol! {
     /// Aerodrome V2 Router interface.
     /// Alamat: 0xcF77a3Ba9A5CA399B7c97c74d54e5b1Beb874E43
     #[derive(Debug, PartialEq)]

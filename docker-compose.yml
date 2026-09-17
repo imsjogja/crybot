@@ -1,6 +1,5 @@
-# Deployment produksi — lihat blueprint Bagian 8.
-# Prasyarat host: IP statis (untuk IP whitelist API key), jam tersinkron NTP/chrony,
-# region AWS Tokyo (Binance) untuk latensi terendah.
+# Deployment Base Network. Sinkronkan waktu host dan isi DASHBOARD_TOKEN bila
+# dashboard di-bind non-loopback di dalam container.
 
 services:
   crybot:

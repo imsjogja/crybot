@@ -21,6 +21,8 @@ pub const DEFAULT_STALE_MS: i64 = 10_000;
 
 /// Window maksimum yang dipertahankan untuk price history & trade flow (1 jam).
 const HISTORY_WINDOW_MS: i64 = 3_600_000;
+const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
+const WEI_PER_ETH: u128 = 1_000_000_000_000_000_000;
 /// Ambang trade "whale" (blueprint §4: `whale_netflow`) dalam satuan token0
 /// mentah. Default 1e18 ≈ 1 unit token 18-desimal (mis. WETH).
 const WHALE_MIN_TOKEN0_RAW: &str = "1000000000000000000";
@@ -237,6 +239,7 @@ impl MarketState {
             }
             p.reserve0 = reserve0;
             p.reserve1 = reserve1;
+            p.liquidity_eth = weth_reserve(p.token0, p.token1, reserve0, reserve1).map(wei_to_eth);
             p.price = if reserve1.is_zero() {
                 Decimal::ZERO
             } else {
@@ -254,6 +257,24 @@ impl MarketState {
 
     pub fn pool_count(&self) -> usize {
         self.pools.len()
+    }
+
+    /// Daftar pool dengan ABI Uniswap V2 `getReserves()`, dari yang paling
+    /// baru ditemukan/diupdate. Dipakai worker feed untuk polling reserve
+    /// tanpa membuat strategi melakukan RPC pada hot path.
+    pub fn v2_pool_addresses_by_recency(&self) -> Vec<Address> {
+        let mut pools: Vec<_> = self
+            .pools
+            .values()
+            .filter(|pool| pool.dex == "uniswap_v2_style")
+            .map(|pool| (pool.pool, pool.last_update_ms))
+            .collect();
+        pools.sort_unstable_by(|(left_address, left_ts), (right_address, right_ts)| {
+            right_ts
+                .cmp(left_ts)
+                .then_with(|| left_address.cmp(right_address))
+        });
+        pools.into_iter().map(|(address, _)| address).collect()
     }
 
     /// Umur state block terakhir relatif terhadap `now` (ms).
@@ -292,6 +313,23 @@ impl MarketState {
 fn u256_to_decimal(v: U256) -> Decimal {
     use std::str::FromStr;
     Decimal::from_str(&v.to_string()).unwrap_or(Decimal::MAX)
+}
+
+fn wei_to_eth(v: U256) -> Decimal {
+    u256_to_decimal(v) / Decimal::from(WEI_PER_ETH)
+}
+
+fn weth_reserve(token0: Address, token1: Address, reserve0: U256, reserve1: U256) -> Option<U256> {
+    let weth = WETH_BASE
+        .parse::<Address>()
+        .expect("WETH Base address must be valid");
+    if token0 == weth {
+        Some(reserve0)
+    } else if token1 == weth {
+        Some(reserve1)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -340,6 +378,33 @@ mod tests {
             .expect("pool ada (case-insensitive)");
         assert_eq!(p.price, Decimal::from(2));
         assert_eq!(p.last_update_ms, 2000);
+    }
+
+    #[test]
+    fn sync_memetakan_reserve_weth_ke_liquidity_eth() {
+        let weth: Address = WETH_BASE.parse().expect("WETH Base valid");
+        let mut market = MarketState::default();
+        market.on_new_pool(
+            Address::repeat_byte(0x11),
+            weth,
+            Address::repeat_byte(0xbb),
+            "uniswap_v2_style",
+            1000,
+        );
+        market.on_pool_sync(
+            Address::repeat_byte(0x11),
+            U256::from(WEI_PER_ETH * 2),
+            U256::from(1_000_000u64),
+            2000,
+        );
+
+        assert_eq!(
+            market
+                .pool(Address::repeat_byte(0x11))
+                .expect("pool exists")
+                .liquidity_eth,
+            Some(Decimal::from(2))
+        );
     }
 
     #[test]
@@ -409,6 +474,39 @@ mod tests {
         assert_eq!(
             p.whale_netflow_token0(60_000, 2_000),
             Decimal::from_str_exact("2000000000000000000").unwrap()
+        );
+    }
+
+    #[test]
+    fn v2_pool_list_hanya_memuat_pair_v2_dan_terurut_terbaru() {
+        let mut market = MarketState::default();
+        let older_v2 = Address::repeat_byte(0x01);
+        let newer_v2 = Address::repeat_byte(0x02);
+        market.on_new_pool(
+            older_v2,
+            Address::repeat_byte(0x11),
+            Address::repeat_byte(0x12),
+            "uniswap_v2_style",
+            100,
+        );
+        market.on_new_pool(
+            Address::repeat_byte(0x03),
+            Address::repeat_byte(0x13),
+            Address::repeat_byte(0x14),
+            "uniswap_v3",
+            300,
+        );
+        market.on_new_pool(
+            newer_v2,
+            Address::repeat_byte(0x15),
+            Address::repeat_byte(0x16),
+            "uniswap_v2_style",
+            200,
+        );
+
+        assert_eq!(
+            market.v2_pool_addresses_by_recency(),
+            vec![newer_v2, older_v2]
         );
     }
 }

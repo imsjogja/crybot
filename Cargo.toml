@@ -2,7 +2,7 @@
 name = "crypto-copy-bot"
 version = "0.2.0"
 edition = "2021"
-description = "Low-latency trading bot for Base Network + Binance copy trading (event-driven, Rust/tokio)"
+description = "Base Network monitoring and paper-strategy bot (event-driven, Rust/Tokio)"
 
 [dependencies]
 base64 = "0.22"

@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
 use tokio::sync::mpsc;
@@ -13,6 +13,56 @@ use tokio::sync::mpsc;
 use crate::events::{LogEntry, StrategyDecision, WsBroadcast};
 
 const DECISIONS_COLUMNS: [&str; 6] = ["ts_ms", "strategy", "pair", "decision", "reasons", "data"];
+
+/// Mengambil block cursor feed yang sudah tersimpan. Cursor hanya boleh maju;
+/// caller harus menyimpannya setelah seluruh event dalam block tersebut
+/// berhasil dimasukkan ke strategy bus.
+pub async fn load_feed_cursor(pool: &SqlitePool, stream: &str) -> Result<Option<u64>> {
+    let cursor: Option<i64> =
+        sqlx::query_scalar("SELECT block_number FROM feed_cursors WHERE stream = ?")
+            .bind(stream)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    cursor
+        .map(|value| {
+            u64::try_from(value)
+                .with_context(|| format!("cursor feed {stream} bernilai negatif/tidak valid"))
+        })
+        .transpose()
+}
+
+/// Menyimpan checkpoint block secara monotonik. Update lama yang datang dari
+/// task reconnect tidak boleh dapat memundurkan cursor task yang lebih baru.
+pub async fn save_feed_cursor(pool: &SqlitePool, stream: &str, block_number: u64) -> Result<()> {
+    let block_number = i64::try_from(block_number)
+        .with_context(|| format!("cursor feed {stream} melebihi batas SQLite INTEGER"))?;
+    sqlx::query(
+        "INSERT INTO feed_cursors (stream, block_number, updated_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(stream) DO UPDATE SET
+             block_number = excluded.block_number,
+             updated_at = excluded.updated_at
+         WHERE excluded.block_number >= feed_cursors.block_number",
+    )
+    .bind(stream)
+    .bind(block_number)
+    .bind(crate::events::now_ms())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Menghapus checkpoint yang terbukti tidak relevan, misalnya ketika cursor
+/// lebih tinggi dari head RPC setelah operator mengganti jaringan. Reset
+/// eksplisit lebih aman daripada membiarkan feed diam selamanya.
+pub async fn clear_feed_cursor(pool: &SqlitePool, stream: &str) -> Result<()> {
+    sqlx::query("DELETE FROM feed_cursors WHERE stream = ?")
+        .bind(stream)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
 
 async fn table_exists(pool: &SqlitePool, name: &str) -> Result<bool> {
     Ok(sqlx::query_scalar(
@@ -108,6 +158,18 @@ pub async fn init_pool(path: &str) -> Result<SqlitePool> {
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts_ms)")
         .execute(&pool)
         .await?;
+
+    // Checkpoint durable untuk feed block/log. Tidak menyimpan payload event:
+    // data primer tetap dibaca ulang dari chain agar recovery deterministik.
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS feed_cursors (
+            stream       TEXT PRIMARY KEY,
+            block_number INTEGER NOT NULL CHECK (block_number >= 0),
+            updated_at   INTEGER NOT NULL
+        )",
+    )
+    .execute(&pool)
+    .await?;
 
     // Tabel posisi (BARU — dipakai semua strategi Base).
     sqlx::query(
@@ -325,6 +387,9 @@ pub struct PaperPerformanceAggregate {
     pub total_positions: i64,
     pub open_positions: i64,
     pub closed_positions: i64,
+    /// Posisi virtual yang tidak dapat dipulihkan setelah process restart.
+    /// Posisi ini bukan close trading dan tidak masuk realized PnL.
+    pub stale_positions: i64,
     pub winning_positions: i64,
     pub losing_positions: i64,
     pub realized_pnl: f64,
@@ -357,13 +422,14 @@ pub async fn paper_performance(
     let aggregate = sqlx::query_as::<_, PaperPerformanceAggregate>(
         "SELECT
             COUNT(*) AS total_positions,
-            COALESCE(SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_positions,
-            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS closed_positions,
-            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL AND pnl > 0 THEN 1 ELSE 0 END), 0) AS winning_positions,
-            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL AND pnl < 0 THEN 1 ELSE 0 END), 0) AS losing_positions,
-            COALESCE(SUM(CASE WHEN closed_at IS NOT NULL THEN pnl ELSE 0.0 END), 0.0) AS realized_pnl,
-            COALESCE(SUM(CASE WHEN closed_at IS NULL THEN pnl ELSE 0.0 END), 0.0) AS unrealized_pnl,
-            COALESCE(SUM(pnl), 0.0) AS total_pnl,
+            COALESCE(SUM(CASE WHEN status = 'open' AND closed_at IS NULL THEN 1 ELSE 0 END), 0) AS open_positions,
+            COALESCE(SUM(CASE WHEN status = 'closed' AND closed_at IS NOT NULL THEN 1 ELSE 0 END), 0) AS closed_positions,
+            COALESCE(SUM(CASE WHEN status = 'stale' THEN 1 ELSE 0 END), 0) AS stale_positions,
+            COALESCE(SUM(CASE WHEN status = 'closed' AND pnl > 0 THEN 1 ELSE 0 END), 0) AS winning_positions,
+            COALESCE(SUM(CASE WHEN status = 'closed' AND pnl < 0 THEN 1 ELSE 0 END), 0) AS losing_positions,
+            COALESCE(SUM(CASE WHEN status = 'closed' THEN pnl ELSE 0.0 END), 0.0) AS realized_pnl,
+            COALESCE(SUM(CASE WHEN status = 'open' THEN pnl ELSE 0.0 END), 0.0) AS unrealized_pnl,
+            COALESCE(SUM(CASE WHEN status != 'stale' THEN pnl ELSE 0.0 END), 0.0) AS total_pnl,
             COALESCE(SUM(costs), 0.0) AS total_costs
          FROM paper_positions",
     )
@@ -383,6 +449,26 @@ pub async fn paper_performance(
 pub async fn paper_performance_json(pool: &SqlitePool) -> Result<serde_json::Value> {
     let (aggregate, positions) = paper_performance(pool).await?;
     Ok(serde_json::json!({"aggregate": aggregate, "positions": positions}))
+}
+
+/// Menandai semua posisi paper yang masih open saat startup sebagai stale.
+///
+/// Simulator menyimpan posisi aktif di memori; ia tidak dapat menghitung close
+/// price yang dapat dipercaya setelah restart. Karena itu posisi lama tidak
+/// boleh tampil sebagai open atau mengubah realized/unrealized PnL sesi baru.
+/// Tidak ada transaksi atau nilai exit sintetis yang dibuat oleh operasi ini.
+pub async fn mark_open_paper_positions_stale(pool: &SqlitePool, stale_at_ms: i64) -> Result<u64> {
+    let result = sqlx::query(
+        "UPDATE paper_positions SET
+            exit_value = NULL, pnl = NULL, status = 'stale',
+            reason = 'stale_after_restart', closed_at = ?, updated_at = ?
+         WHERE status = 'open' AND closed_at IS NULL",
+    )
+    .bind(stale_at_ms)
+    .bind(stale_at_ms)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected())
 }
 
 fn value_string(value: &serde_json::Value, names: &[&str]) -> Option<String> {
@@ -815,6 +901,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn feed_cursor_disimpan_dan_tidak_boleh_mundur() {
+        let (pool, path) = pool_temp("feed-cursor").await;
+        assert_eq!(
+            load_feed_cursor(&pool, "wallet_tx_confirmed:paper")
+                .await
+                .unwrap(),
+            None
+        );
+
+        save_feed_cursor(&pool, "wallet_tx_confirmed:paper", 100)
+            .await
+            .unwrap();
+        save_feed_cursor(&pool, "wallet_tx_confirmed:paper", 99)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_feed_cursor(&pool, "wallet_tx_confirmed:paper")
+                .await
+                .unwrap(),
+            Some(100)
+        );
+
+        save_feed_cursor(&pool, "wallet_tx_confirmed:paper", 101)
+            .await
+            .unwrap();
+        assert_eq!(
+            load_feed_cursor(&pool, "wallet_tx_confirmed:paper")
+                .await
+                .unwrap(),
+            Some(101)
+        );
+
+        clear_feed_cursor(&pool, "wallet_tx_confirmed:paper")
+            .await
+            .unwrap();
+        assert_eq!(
+            load_feed_cursor(&pool, "wallet_tx_confirmed:paper")
+                .await
+                .unwrap(),
+            None
+        );
+
+        pool.close().await;
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
     async fn init_pool_migrates_legacy_decisions_schema_without_losing_data() {
         let path = std::env::temp_dir().join(format!(
             "crybot-test-decisions-legacy-{}-{}.db",
@@ -1083,6 +1216,56 @@ mod tests {
 
         drop(tx);
         handle.await.unwrap();
+        pool.close().await;
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn paper_positions_open_dari_sesi_lama_ditandai_stale_tanpa_pnl() {
+        let (pool, path) = pool_temp("paper-stale-restart").await;
+        let opened = LogEntry {
+            kind: "paper_position_opened".into(),
+            payload: serde_json::json!({
+                "id": "sniper-stale", "strategy": "sniper", "pair": "WETH/TOKEN",
+                "token_amount": "42", "entry_value": "1.01", "costs": "0.01",
+                "opened_at_ms": 1000
+            })
+            .to_string(),
+            ts_ms: 1000,
+        };
+        let valued = LogEntry {
+            kind: "paper_position_valued".into(),
+            payload: serde_json::json!({
+                "id": "sniper-stale", "net_exit_eth": "1.20", "pnl": "0.19"
+            })
+            .to_string(),
+            ts_ms: 1500,
+        };
+        assert!(write_paper_position(&pool, &opened).await.unwrap());
+        assert!(write_paper_position(&pool, &valued).await.unwrap());
+
+        assert_eq!(
+            mark_open_paper_positions_stale(&pool, 2000).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            mark_open_paper_positions_stale(&pool, 3000).await.unwrap(),
+            0
+        );
+
+        let (aggregate, positions) = paper_performance(&pool).await.unwrap();
+        assert_eq!(aggregate.open_positions, 0);
+        assert_eq!(aggregate.closed_positions, 0);
+        assert_eq!(aggregate.stale_positions, 1);
+        assert_eq!(aggregate.realized_pnl, 0.0);
+        assert_eq!(aggregate.unrealized_pnl, 0.0);
+        assert_eq!(aggregate.total_pnl, 0.0);
+        assert_eq!(positions[0].status, "stale");
+        assert_eq!(positions[0].reason.as_deref(), Some("stale_after_restart"));
+        assert_eq!(positions[0].closed_at, Some(2000));
+        assert_eq!(positions[0].exit_value, None);
+        assert_eq!(positions[0].pnl, None);
+
         pool.close().await;
         bersihkan(&path);
     }

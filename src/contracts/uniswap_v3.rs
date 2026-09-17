@@ -5,6 +5,24 @@
 use alloy_sol_types::sol;
 
 sol! {
+    /// Pool Uniswap V3 untuk pembacaan harga spot `slot0`.
+    #[derive(Debug, PartialEq)]
+    interface IUniswapV3Pool {
+        function token0() external view returns (address);
+        function token1() external view returns (address);
+        function slot0() external view returns (
+            uint160 sqrtPriceX96,
+            int24 tick,
+            uint16 observationIndex,
+            uint16 observationCardinality,
+            uint16 observationCardinalityNext,
+            uint8 feeProtocol,
+            bool unlocked
+        );
+    }
+}
+
+sol! {
     /// Uniswap V3 SwapRouter02 interface.
     /// Alamat: 0x2626664c2603336E57B271c5C0b26F421741e481
     #[derive(Debug, PartialEq)]

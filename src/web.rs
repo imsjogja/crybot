@@ -118,12 +118,19 @@ fn build_status_json(st: &WebState) -> Value {
         "uptime_sec": uptime_sec,
         "wallet_address": st.wallet_address,
         "base_http_url": st.base_http_url,
-        "strategies": strategy_statuses(&st.strategies),
+        "execution": execution_capability(),
+        "strategies": strategy_statuses(&st.strategies, st.mode),
         "risk": st.risk.status_json(),
         "metrics": {
             "new_heads_received": snap.new_heads_received,
             "factory_logs_received": snap.factory_logs_received,
             "pools_detected": snap.pools_detected,
+            "pool_syncs_received": snap.pool_syncs_received,
+            "pool_sync_errors": snap.pool_sync_errors,
+            "wallet_txs_received": snap.wallet_txs_received,
+            "wallet_tx_errors": snap.wallet_tx_errors,
+            "price_ticks_received": snap.price_ticks_received,
+            "price_feed_errors": snap.price_feed_errors,
             "factory_unknown_logs": snap.factory_unknown_logs,
             "orders": snap.orders,
             "fills": snap.follower_fills,
@@ -190,11 +197,209 @@ async fn build_signals_json(pool: &SqlitePool) -> Value {
     json!({"signals": signals})
 }
 
-fn build_strategies_json(strategies: &StrategiesCfg) -> Value {
+fn execution_capability() -> Value {
+    json!({
+        "ready": false,
+        "state": "blocked_no_order_producer",
+        "reason": "Tidak ada strategi yang menghasilkan BaseOrder production-ready; \
+                   aplikasi tidak dapat broadcast transaksi.",
+    })
+}
+
+fn strategy_status(name: &str, enabled: bool, capability: &str, reason: &str) -> Value {
+    json!({
+        "name": name,
+        "enabled": enabled,
+        "capability": capability,
+        "execution_ready": false,
+        "reason": reason,
+    })
+}
+
+fn strategy_statuses(strategies: &StrategiesCfg, mode: Mode) -> Vec<Value> {
+    let sniper = if !strategies.sniper.enabled {
+        strategy_status(
+            "sniper",
+            false,
+            "disabled",
+            "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if mode.is_paper() && strategies.sniper.paper_simulation.enabled {
+        strategy_status(
+            "sniper",
+            true,
+            "paper_model",
+            "Model reserve V2 read-only; tidak membuat atau mengirim BaseOrder.",
+        )
+    } else {
+        strategy_status(
+            "sniper",
+            true,
+            "configured_no_runtime_action",
+            "Simulator paper nonaktif atau mode bukan paper; handler tidak membuat aksi.",
+        )
+    };
+    let copy_onchain = if !strategies.copy_onchain.enabled {
+        strategy_status(
+            "copy_onchain",
+            false,
+            "disabled",
+            "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if !strategies
+        .copy_onchain
+        .target_wallets
+        .iter()
+        .any(|target| target.enabled)
+    {
+        strategy_status(
+            "copy_onchain",
+            true,
+            "blocked_missing_wallet_targets",
+            "Tidak ada target wallet aktif untuk dipantau.",
+        )
+    } else {
+        strategy_status(
+            "copy_onchain",
+            true,
+            "observe_only",
+            "Listener WalletTx confirmed aktif untuk wallet target; calldata masih opaque dan tidak pernah dieksekusi.",
+        )
+    };
+    let configured_price_pairs: std::collections::HashSet<_> = strategies
+        .price_feeds
+        .iter()
+        .map(|feed| feed.pair.as_str())
+        .collect();
+    let missing_grid_price_feed = strategies
+        .grid_dca
+        .grids
+        .iter()
+        .any(|grid| !configured_price_pairs.contains(grid.pair.as_str()));
+    let grid_dca = if !strategies.grid_dca.enabled {
+        strategy_status(
+            "grid_dca",
+            false,
+            "disabled",
+            "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if missing_grid_price_feed {
+        strategy_status(
+            "grid_dca",
+            true,
+            "blocked_missing_price_feed",
+            "Scheduler DcaTrigger aktif untuk plan valid, tetapi tidak semua grid memiliki source PriceTick terkonfigurasi; tidak ada calldata swap tervalidasi.",
+        )
+    } else if strategies.grid_dca.grids.is_empty() && strategies.grid_dca.dca_plans.is_empty() {
+        strategy_status(
+            "grid_dca",
+            true,
+            "blocked_missing_strategy_config",
+            "Tidak ada grid atau DCA plan yang dapat diproses.",
+        )
+    } else {
+        strategy_status(
+            "grid_dca",
+            true,
+            "observe_only",
+            "Source PriceTick dan scheduler DcaTrigger tersedia untuk konfigurasi saat ini; sinyal tetap tidak membuat order.",
+        )
+    };
+    let arbitrage = strategy_status(
+        "arbitrage",
+        strategies.arbitrage.enabled,
+        if strategies.arbitrage.enabled {
+            "observe_only"
+        } else {
+            "disabled"
+        },
+        if strategies.arbitrage.enabled {
+            "PoolSync V2 tersedia, tetapi strategi hanya melaporkan kandidat dan tidak membangun transaksi atomik."
+        } else {
+            "Dinonaktifkan oleh konfigurasi."
+        },
+    );
+    let yield_farming = if !strategies.yield_farming.enabled {
+        strategy_status(
+            "yield_farming",
+            false,
+            "disabled",
+            "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if !strategies
+        .yield_farming
+        .positions
+        .iter()
+        .any(|position| position.auto_compound)
+    {
+        strategy_status(
+            "yield_farming",
+            true,
+            "blocked_missing_compound_positions",
+            "Tidak ada posisi auto-compound aktif untuk dijadwalkan.",
+        )
+    } else {
+        strategy_status(
+            "yield_farming",
+            true,
+            "observe_only",
+            "Scheduler CompoundTrigger aktif untuk posisi auto-compound; fee, router, dan calldata compound belum tervalidasi.",
+        )
+    };
+    let missing_perps_price_feed = strategies
+        .perps
+        .positions
+        .iter()
+        .any(|position| !configured_price_pairs.contains(position.market.to_string().as_str()));
+    let perps = if !strategies.perps.enabled {
+        strategy_status(
+            "perps",
+            false,
+            "disabled",
+            "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if strategies.perps.positions.is_empty() {
+        strategy_status(
+            "perps",
+            true,
+            "blocked_missing_strategy_config",
+            "Tidak ada posisi perps yang dapat dipantau.",
+        )
+    } else if missing_perps_price_feed {
+        strategy_status(
+            "perps",
+            true,
+            "blocked_missing_price_feed",
+            "Tidak semua market perps memiliki source PriceTick terkonfigurasi.",
+        )
+    } else {
+        strategy_status(
+            "perps",
+            true,
+            "observe_only",
+            "Source PriceTick tersedia; reader dan order GMX belum tervalidasi.",
+        )
+    };
+
+    vec![
+        sniper,
+        copy_onchain,
+        grid_dca,
+        arbitrage,
+        yield_farming,
+        perps,
+    ]
+}
+
+fn build_strategies_json(strategies: &StrategiesCfg, mode: Mode) -> Value {
+    let statuses = strategy_statuses(strategies, mode);
     json!({"strategies": [
         {
             "name": "sniper",
             "enabled": strategies.sniper.enabled,
+            "capability": statuses[0]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[0]["reason"].clone(),
             "configured": !strategies.sniper.dex_factories.is_empty(),
             "configured_factories": strategies.sniper.dex_factories.len(),
             "max_buy_eth": strategies.sniper.max_buy_eth.to_string(),
@@ -211,12 +416,18 @@ fn build_strategies_json(strategies: &StrategiesCfg) -> Value {
         {
             "name": "copy_onchain",
             "enabled": strategies.copy_onchain.enabled,
+            "capability": statuses[1]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[1]["reason"].clone(),
             "configured": !strategies.copy_onchain.target_wallets.is_empty(),
             "configured_wallets": strategies.copy_onchain.target_wallets.len(),
         },
         {
             "name": "grid_dca",
             "enabled": strategies.grid_dca.enabled,
+            "capability": statuses[2]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[2]["reason"].clone(),
             "configured": !strategies.grid_dca.grids.is_empty() || !strategies.grid_dca.dca_plans.is_empty(),
             "configured_grids": strategies.grid_dca.grids.len(),
             "configured_dca_plans": strategies.grid_dca.dca_plans.len(),
@@ -224,18 +435,27 @@ fn build_strategies_json(strategies: &StrategiesCfg) -> Value {
         {
             "name": "arbitrage",
             "enabled": strategies.arbitrage.enabled,
+            "capability": statuses[3]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[3]["reason"].clone(),
             "configured": !strategies.arbitrage.monitored_pools.is_empty(),
             "configured_pools": strategies.arbitrage.monitored_pools.len(),
         },
         {
             "name": "yield_farming",
             "enabled": strategies.yield_farming.enabled,
+            "capability": statuses[4]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[4]["reason"].clone(),
             "configured": !strategies.yield_farming.positions.is_empty(),
             "configured_positions": strategies.yield_farming.positions.len(),
         },
         {
             "name": "perps",
             "enabled": strategies.perps.enabled,
+            "capability": statuses[5]["capability"].clone(),
+            "execution_ready": false,
+            "reason": statuses[5]["reason"].clone(),
             "configured": !strategies.perps.positions.is_empty(),
             "configured_positions": strategies.perps.positions.len(),
         },
@@ -257,22 +477,11 @@ async fn api_status(State(st): State<Shared>, headers: HeaderMap) -> impl IntoRe
     Json(build_status_json(&st)).into_response()
 }
 
-fn strategy_statuses(strategies: &StrategiesCfg) -> Vec<Value> {
-    vec![
-        json!({"name": "sniper", "enabled": strategies.sniper.enabled}),
-        json!({"name": "copy_onchain", "enabled": strategies.copy_onchain.enabled}),
-        json!({"name": "grid_dca", "enabled": strategies.grid_dca.enabled}),
-        json!({"name": "arbitrage", "enabled": strategies.arbitrage.enabled}),
-        json!({"name": "yield_farming", "enabled": strategies.yield_farming.enabled}),
-        json!({"name": "perps", "enabled": strategies.perps.enabled}),
-    ]
-}
-
 async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl IntoResponse {
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
     }
-    Json(build_strategies_json(&st.strategies)).into_response()
+    Json(build_strategies_json(&st.strategies, st.mode)).into_response()
 }
 
 type PositionRow = (String, String, String, String, f64, f64, i64, Option<f64>);
@@ -459,7 +668,7 @@ async fn ws_status(socket: WebSocket, st: Shared) {
     let trades = build_trades_json(&st.pool).await;
     let signals = build_signals_json(&st.pool).await;
     let decisions = build_decisions_json(&st.pool).await;
-    let strategies = build_strategies_json(&st.strategies);
+    let strategies = build_strategies_json(&st.strategies, st.mode);
     let paper_performance = paper_performance_json(&st.pool).await.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "gagal query paper performance untuk WS init");
         json!({"aggregate": {}, "positions": []})
@@ -576,5 +785,60 @@ pub async fn run_web_server(state: Shared, bind: String, mut shutdown: watch::Re
     });
     if let Err(e) = server.await {
         tracing::error!(error = %e, "dashboard web error");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::WalletTargetCfg;
+    use rust_decimal::Decimal;
+
+    fn target_wallet(address: alloy::primitives::Address) -> WalletTargetCfg {
+        WalletTargetCfg {
+            address,
+            label: "uji".into(),
+            enabled: true,
+            copy_ratio: Decimal::ONE,
+            min_tx_eth: Decimal::ZERO,
+            max_tx_eth: Decimal::ONE,
+        }
+    }
+
+    #[test]
+    fn execution_capability_is_explicitly_blocked() {
+        let capability = execution_capability();
+        assert_eq!(capability["ready"], false);
+        assert_eq!(capability["state"], "blocked_no_order_producer");
+    }
+
+    #[test]
+    fn copy_strategy_becomes_observe_only_only_with_active_wallet() {
+        let mut strategies = StrategiesCfg::default();
+        strategies.copy_onchain.enabled = true;
+        assert_eq!(
+            strategy_statuses(&strategies, Mode::Paper)[1]["capability"],
+            "blocked_missing_wallet_targets"
+        );
+
+        strategies
+            .copy_onchain
+            .target_wallets
+            .push(target_wallet(alloy::primitives::Address::repeat_byte(0x11)));
+        assert_eq!(
+            strategy_statuses(&strategies, Mode::Paper)[1]["capability"],
+            "observe_only"
+        );
+    }
+
+    #[test]
+    fn strategy_json_has_capability_for_all_supported_strategies() {
+        let strategies = StrategiesCfg::default();
+        let document = build_strategies_json(&strategies, Mode::Paper);
+        let items = document["strategies"].as_array().expect("strategies array");
+
+        assert_eq!(items.len(), 6);
+        assert!(items.iter().all(|item| item["capability"].is_string()));
+        assert!(items.iter().all(|item| item["execution_ready"] == false));
     }
 }

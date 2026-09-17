@@ -4,8 +4,8 @@
 //! posisi virtual di memori. Ia tidak membuat order, memakai signer, atau
 //! menyiarkan transaksi.
 
-use std::collections::HashSet;
 use std::str::FromStr;
+use std::time::Duration;
 
 use alloy::network::TransactionBuilder;
 use alloy::primitives::{Address, Bytes, U256};
@@ -14,13 +14,14 @@ use alloy::rpc::types::eth::TransactionRequest;
 use alloy_sol_types::SolCall;
 use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
+use tokio::sync::{mpsc, watch};
+use tokio::time::MissedTickBehavior;
 
 use crate::config::{PaperSimulationCfg, SniperCfg};
 use crate::contracts::uniswap_v2_pair::IUniswapV2Pair;
 use crate::events::{now_ms, MonitorMsg, StrategyEvent, StrategySource};
 
-use super::common::get_amount_out;
-use super::common::StrategyContext;
+use super::common::{get_amount_out, BoundedDedup, StrategyContext};
 use super::{SharedState, Strategy};
 
 const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
@@ -30,13 +31,19 @@ const RESERVE_RPC_MAX_ATTEMPTS: u32 = 3;
 const RESERVE_RPC_INITIAL_BACKOFF_MS: u64 = 1_000;
 const RESERVE_RPC_MIN_SPACING_MS: u64 = 1_000;
 const RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS: u64 = 30_000;
+const RESERVE_RPC_TIMEOUT: Duration = Duration::from_secs(5);
+/// Batas antrean menjaga `StrategyEngine` tetap responsif saat RPC sniper
+/// lebih lambat daripada laju event `NewPool`.
+const SNIPER_CANDIDATE_QUEUE_CAPACITY: usize = 64;
+const MAX_SEEN_POOLS: usize = 10_000;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Candidate {
     pool: Address,
     token0: Address,
     token1: Address,
     factory: Address,
+    dex: String,
     ts_ms: i64,
 }
 
@@ -76,9 +83,18 @@ impl ExitReason {
 /// Strategi pemantau pool baru dengan deduplikasi per alamat pool.
 pub struct SniperStrategy {
     cfg: SniperCfg,
-    seen_pools: HashSet<Address>,
+    tx_candidates: Option<mpsc::Sender<Candidate>>,
+}
+
+/// Worker serial khusus simulator sniper.
+///
+/// Semua RPC, retry, pacing, dan state mutable sengaja dimiliki task ini,
+/// bukan loop dispatch strategi. Satu worker mempertahankan limiter RPC dan
+/// urutan evaluasi tanpa membuat dispatcher menunggu.
+struct SniperWorker {
+    cfg: SniperCfg,
+    seen_pools: BoundedDedup<Address>,
     positions: Vec<VirtualPosition>,
-    last_poll_ms: i64,
     last_reserve_read_at: Option<tokio::time::Instant>,
     reserve_rate_limit_until: Option<tokio::time::Instant>,
 }
@@ -87,27 +103,89 @@ impl SniperStrategy {
     pub fn new(cfg: SniperCfg) -> Self {
         Self {
             cfg,
-            seen_pools: HashSet::new(),
+            tx_candidates: None,
+        }
+    }
+}
+
+impl SniperWorker {
+    fn new(cfg: SniperCfg) -> Self {
+        Self {
+            cfg,
+            seen_pools: BoundedDedup::new(MAX_SEEN_POOLS),
             positions: Vec::new(),
-            last_poll_ms: 0,
             last_reserve_read_at: None,
             reserve_rate_limit_until: None,
         }
     }
 
     fn pool_is_new(&mut self, pool: Address) -> bool {
-        self.seen_pools.insert(pool)
+        self.seen_pools.insert_if_new(pool)
     }
 
-    async fn process_candidate(&mut self, candidate: Candidate, dex: &str, state: &SharedState) {
+    async fn run(
+        mut self,
+        mut rx_candidates: mpsc::Receiver<Candidate>,
+        state: SharedState,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        let mut position_poll =
+            tokio::time::interval(paper_poll_interval(&self.cfg.paper_simulation));
+        position_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // `interval` selalu menghasilkan tick pertama segera; konsumsi agar
+        // posisi pertama baru dievaluasi setelah interval penuh.
+        position_poll.tick().await;
+
+        loop {
+            tokio::select! {
+                biased;
+
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        tracing::info!("worker sniper berhenti karena shutdown");
+                        return;
+                    }
+                }
+                _ = position_poll.tick() => {
+                    tokio::select! {
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                tracing::info!("worker sniper berhenti saat polling posisi");
+                                return;
+                            }
+                        }
+                        _ = self.poll_positions(&state) => {}
+                    }
+                }
+                candidate = rx_candidates.recv() => {
+                    let Some(candidate) = candidate else {
+                        tracing::info!("worker sniper berhenti — channel kandidat ditutup");
+                        return;
+                    };
+                    tokio::select! {
+                        changed = shutdown.changed() => {
+                            if changed.is_err() || *shutdown.borrow() {
+                                tracing::info!("worker sniper berhenti saat mengevaluasi kandidat");
+                                return;
+                            }
+                        }
+                        _ = self.process_candidate(candidate, &state) => {}
+                    }
+                }
+            }
+        }
+    }
+
+    async fn process_candidate(&mut self, candidate: Candidate, state: &SharedState) {
         let Candidate {
             pool,
             token0,
             token1,
             factory,
+            dex,
             ts_ms,
         } = candidate;
-        let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
+        let ctx = StrategyContext::new("sniper", StrategySource::Sniper, state);
         let pair = format!("{token0}/{token1}");
         if !self.pool_is_new(pool) {
             ctx.decision(
@@ -264,13 +342,9 @@ impl SniperStrategy {
 
     async fn poll_positions(&mut self, state: &SharedState) {
         let now = now_ms();
-        if self.positions.is_empty()
-            || now.saturating_sub(self.last_poll_ms)
-                < self.cfg.paper_simulation.poll_interval_ms as i64
-        {
+        if self.positions.is_empty() {
             return;
         }
-        self.last_poll_ms = now;
         let positions = std::mem::take(&mut self.positions);
         let mut still_open = Vec::with_capacity(positions.len());
         for position in positions {
@@ -359,10 +433,7 @@ impl Strategy for SniperStrategy {
     }
 
     async fn on_event(&mut self, event: &StrategyEvent, state: &SharedState) {
-        if !paper_simulator_active(&self.cfg, state.mode) {
-            return;
-        }
-        if let StrategyEvent::NewPool {
+        let StrategyEvent::NewPool {
             pool,
             token0,
             token1,
@@ -370,34 +441,49 @@ impl Strategy for SniperStrategy {
             dex,
             ts_ms,
         } = event
-        {
-            self.process_candidate(
-                Candidate {
-                    pool: *pool,
-                    token0: *token0,
-                    token1: *token1,
-                    factory: *factory,
-                    ts_ms: *ts_ms,
-                },
-                dex,
-                state,
-            )
-            .await;
-        }
-        if matches!(
-            event,
-            StrategyEvent::NewBlock { .. } | StrategyEvent::Flashblock { .. }
+        else {
+            return;
+        };
+        let Some(tx_candidates) = &self.tx_candidates else {
+            return;
+        };
+        match enqueue_candidate(
+            tx_candidates,
+            Candidate {
+                pool: *pool,
+                token0: *token0,
+                token1: *token1,
+                factory: *factory,
+                dex: dex.clone(),
+                ts_ms: *ts_ms,
+            },
         ) {
-            self.poll_positions(state).await;
+            CandidateEnqueueResult::Queued => {}
+            CandidateEnqueueResult::Full => {
+                state.metrics.inc(&state.metrics.skips);
+                tracing::warn!(
+                    pool = %pool,
+                    capacity = SNIPER_CANDIDATE_QUEUE_CAPACITY,
+                    "antrean kandidat sniper penuh; kandidat dilewati agar dispatcher tidak terblokir"
+                );
+            }
+            CandidateEnqueueResult::Closed => {
+                state.metrics.inc(&state.metrics.skips);
+                tracing::warn!(
+                    pool = %pool,
+                    "worker sniper tidak tersedia; kandidat dilewati"
+                );
+            }
         }
     }
 
     async fn start(&mut self, state: &SharedState) {
         let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
-        let mode = if paper_simulator_active(&self.cfg, state.mode) {
+        let worker_active = paper_worker_active(&self.cfg, state.mode);
+        let mode = if worker_active {
             "simulator paper V2 read-only aktif; tidak ada transaksi"
         } else if self.cfg.paper_simulation.enabled {
-            "simulator paper dikonfigurasi tetapi nonaktif karena mode aplikasi bukan paper"
+            "simulator paper dikonfigurasi tetapi nonaktif karena mode aplikasi bukan paper atau konfigurasi tidak valid"
         } else {
             "simulator paper nonaktif"
         };
@@ -409,12 +495,47 @@ impl Strategy for SniperStrategy {
         )
         .await;
         ctx.log("sniper_started", mode.into()).await;
-        if paper_simulator_active(&self.cfg, state.mode) {
+        if worker_active {
+            let (tx_candidates, rx_candidates) = mpsc::channel(SNIPER_CANDIDATE_QUEUE_CAPACITY);
+            let worker = SniperWorker::new(self.cfg.clone());
+            let worker_state = state.clone();
+            let worker_shutdown = state.rx_shutdown.clone();
+            tokio::spawn(async move {
+                worker
+                    .run(rx_candidates, worker_state, worker_shutdown)
+                    .await;
+            });
+            self.tx_candidates = Some(tx_candidates);
             ctx.alert(MonitorMsg::Info(
-                "SNIPER PAPER: simulator V2 read-only aktif; tidak ada transaksi broadcast".into(),
+                "SNIPER PAPER: worker simulator V2 read-only aktif; tidak ada transaksi broadcast"
+                    .into(),
+            ))
+            .await;
+        } else if paper_simulator_active(&self.cfg, state.mode) {
+            ctx.alert(MonitorMsg::Warning(
+                "SNIPER PAPER: simulator tidak dijalankan karena konfigurasi paper tidak valid"
+                    .into(),
             ))
             .await;
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateEnqueueResult {
+    Queued,
+    Full,
+    Closed,
+}
+
+fn enqueue_candidate(
+    tx_candidates: &mpsc::Sender<Candidate>,
+    candidate: Candidate,
+) -> CandidateEnqueueResult {
+    match tx_candidates.try_send(candidate) {
+        Ok(()) => CandidateEnqueueResult::Queued,
+        Err(mpsc::error::TrySendError::Full(_)) => CandidateEnqueueResult::Full,
+        Err(mpsc::error::TrySendError::Closed(_)) => CandidateEnqueueResult::Closed,
     }
 }
 
@@ -423,9 +544,9 @@ async fn read_reserves(
     provider: &alloy::providers::RootProvider,
 ) -> Result<(U256, U256), ReserveReadFailure> {
     for attempt in 1..=RESERVE_RPC_MAX_ATTEMPTS {
-        match read_reserves_once(pool, provider).await {
-            Ok(reserves) => return Ok(reserves),
-            Err(error) => {
+        match tokio::time::timeout(RESERVE_RPC_TIMEOUT, read_reserves_once(pool, provider)).await {
+            Ok(Ok(reserves)) => return Ok(reserves),
+            Ok(Err(error)) => {
                 let rate_limited = is_rate_limited_error(&error);
                 if let Some(delay_ms) = reserve_retry_delay_ms(attempt, rate_limited) {
                     tracing::debug!(%pool, attempt, delay_ms, %error, "getReserves V2 gagal; retry terbatas");
@@ -438,6 +559,19 @@ async fn read_reserves(
                     };
                     tracing::warn!(%pool, attempt, max_attempts = RESERVE_RPC_MAX_ATTEMPTS, rate_limited, %error, "getReserves V2 gagal setelah retry terbatas");
                     return Err(failure);
+                }
+            }
+            Err(_) => {
+                let error = format!(
+                    "getReserves V2 timeout setelah {} ms",
+                    RESERVE_RPC_TIMEOUT.as_millis()
+                );
+                if let Some(delay_ms) = reserve_retry_delay_ms(attempt, false) {
+                    tracing::debug!(%pool, attempt, delay_ms, %error, "getReserves V2 timeout; retry terbatas");
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                } else {
+                    tracing::warn!(%pool, attempt, max_attempts = RESERVE_RPC_MAX_ATTEMPTS, %error, "getReserves V2 timeout setelah retry terbatas");
+                    return Err(ReserveReadFailure::Other);
                 }
             }
         }
@@ -501,6 +635,14 @@ fn is_weth_pair(token0: &Address, token1: &Address) -> bool {
 
 fn paper_simulator_active(cfg: &SniperCfg, mode: crate::config::Mode) -> bool {
     cfg.paper_simulation.enabled && mode.is_paper()
+}
+
+fn paper_worker_active(cfg: &SniperCfg, mode: crate::config::Mode) -> bool {
+    paper_simulator_active(cfg, mode) && simulation_config_is_valid(cfg, &cfg.paper_simulation)
+}
+
+fn paper_poll_interval(paper: &PaperSimulationCfg) -> Duration {
+    Duration::from_millis(paper.poll_interval_ms)
 }
 
 fn simulation_config_is_valid(cfg: &SniperCfg, paper: &PaperSimulationCfg) -> bool {
@@ -634,6 +776,51 @@ fn startup_payload(cfg: &SniperCfg) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::config::BaseAddresses;
+
+    fn test_candidate(byte: u8) -> Candidate {
+        Candidate {
+            pool: Address::repeat_byte(byte),
+            token0: Address::repeat_byte(byte.wrapping_add(1)),
+            token1: Address::repeat_byte(byte.wrapping_add(2)),
+            factory: Address::repeat_byte(byte.wrapping_add(3)),
+            dex: "test-dex".into(),
+            ts_ms: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn candidate_queue_is_bounded_without_waiting_for_the_worker() {
+        let (tx, _rx) = mpsc::channel(1);
+
+        assert_eq!(
+            enqueue_candidate(&tx, test_candidate(1)),
+            CandidateEnqueueResult::Queued
+        );
+        assert_eq!(
+            enqueue_candidate(&tx, test_candidate(2)),
+            CandidateEnqueueResult::Full
+        );
+    }
+
+    #[test]
+    fn worker_only_starts_for_valid_paper_configuration() {
+        let mut cfg = SniperCfg::default();
+        cfg.paper_simulation.enabled = true;
+        cfg.paper_simulation.poll_interval_ms = 25;
+        assert!(paper_worker_active(&cfg, crate::config::Mode::Paper));
+        assert_eq!(
+            paper_poll_interval(&cfg.paper_simulation),
+            Duration::from_millis(25)
+        );
+
+        cfg.paper_simulation.poll_interval_ms = 0;
+        assert!(!paper_worker_active(&cfg, crate::config::Mode::Paper));
+    }
+
+    #[test]
+    fn reserve_rpc_timeout_is_bounded() {
+        assert_eq!(RESERVE_RPC_TIMEOUT, Duration::from_secs(5));
+    }
 
     #[test]
     fn only_known_v2_factories_are_supported() {

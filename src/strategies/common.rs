@@ -1,5 +1,8 @@
 //! Utilitas common untuk semua strategi.
 
+use std::collections::{HashSet, VecDeque};
+use std::hash::Hash;
+
 use alloy::primitives::{Address, U256};
 use rust_decimal::Decimal;
 use tokio::sync::mpsc;
@@ -10,6 +13,51 @@ pub const MAX_RETRIES: u32 = 3;
 pub const DEFAULT_SLIPPAGE_BPS: u32 = 300;
 pub const DEFAULT_GAS_LIMIT: u64 = 300_000;
 pub const MAX_HOLDER_PCT: i32 = 20;
+
+/// Deduplikasi FIFO dengan batas memori tetap.
+///
+/// Feed yang memiliki cursor persisten hanya membutuhkan jendela deduplikasi
+/// lokal untuk event replay/reconnect jangka pendek. Menyimpan seluruh ID
+/// selama proses hidup membuat bot monitor jangka panjang terus memakai memori.
+pub struct BoundedDedup<T> {
+    capacity: usize,
+    order: VecDeque<T>,
+    entries: HashSet<T>,
+}
+
+impl<T> BoundedDedup<T>
+where
+    T: Clone + Eq + Hash,
+{
+    pub fn new(capacity: usize) -> Self {
+        assert!(capacity > 0, "kapasitas deduplikasi harus lebih dari nol");
+        Self {
+            capacity,
+            order: VecDeque::with_capacity(capacity),
+            entries: HashSet::with_capacity(capacity),
+        }
+    }
+
+    /// Mengembalikan `true` hanya pada ID baru. Bila kapasitas tercapai, ID
+    /// tertua dieviction; cursor feed tetap menjadi sumber recovery utama.
+    pub fn insert_if_new(&mut self, value: T) -> bool {
+        if !self.entries.insert(value.clone()) {
+            return false;
+        }
+        self.order.push_back(value);
+        if self.order.len() > self.capacity {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
 
 /// Helper per-strategi untuk mengirim log dan alert.
 #[allow(dead_code)]
@@ -140,6 +188,18 @@ mod tests {
         assert!(!out.is_zero());
         assert!(out > U256::from(9_000_000_000_000_000u64));
         assert!(out < U256::from(10_000_000_000_000_000u64));
+    }
+
+    #[test]
+    fn bounded_dedup_evicts_oldest_value_at_capacity() {
+        let mut dedup = BoundedDedup::new(2);
+        assert!(dedup.insert_if_new("first"));
+        assert!(dedup.insert_if_new("second"));
+        assert!(!dedup.insert_if_new("first"));
+        assert!(dedup.insert_if_new("third"));
+        assert_eq!(dedup.len(), 2);
+        assert!(dedup.insert_if_new("first"));
+        assert_eq!(dedup.len(), 2);
     }
 
     #[test]
