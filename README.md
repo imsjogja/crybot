@@ -180,11 +180,17 @@ Sebelum mengubah `risk.armed: true` pada `config/testnet.yaml`:
    yang sama dengan pool token uji yang dikontrol operator.
 5. Pastikan `max_buy_eth <= risk.max_tx_value_eth`, likuiditas minimum,
    slippage, dan deadline sesuai nilai uji kecil.
-6. Jalankan validasi lokal, lalu mulai dengan `risk.armed: false` untuk
-   memastikan monitoring menemukan pool yang diharapkan.
-7. Arm hanya untuk satu uji BUY, pantau `trade_intent`, `risk_decided`,
+6. Jalankan preflight read-only berikut dengan `risk.armed: false`; test ini
+   memeriksa chain ID dan bytecode route, serta tidak dapat broadcast:
+   ```bash
+   CRYBOT_TESTNET_CONFIG=config/testnet.yaml \
+     cargo test --test testnet_preflight -- --ignored --nocapture
+   ```
+7. Mulai dengan `risk.armed: false` untuk memastikan monitoring menemukan
+   pool yang diharapkan.
+8. Arm hanya untuk satu uji BUY, pantau `trade_intent`, `risk_decided`,
    `simulation_failed`/`base_swap`, receipt, dan saldo wallet.
-8. Setelah uji, set kembali `risk.armed: false` dan simpan hash transaksi
+9. Setelah uji, set kembali `risk.armed: false` dan simpan hash transaksi
    serta hasilnya sebagai bukti E2E.
 
 Belum ada sell/approval policy, position manager, realized PnL untuk posisi

@@ -68,6 +68,9 @@ memiliki satu producer runtime yang diuji.
 - [x] Bentuk `BaseOrder` dengan quote timestamp, `amountOutMin`, calldata, dan
   audit `trade_intent`; simulator dan executor menjalankan risk → `eth_call`
   → receipt lifecycle.
+- [x] Tambahkan preflight `#[ignore]` read-only untuk config operator:
+  validasi capability armed di memori, chain ID `84532`, dan bytecode factory,
+  router, serta wrapped native tanpa broadcast.
 - [ ] Tambahkan policy approval dan SELL eksplisit untuk exit. BUY native ETH
   saat ini tidak membutuhkan approval, tetapi tidak boleh diklaim sebagai
   position manager.
