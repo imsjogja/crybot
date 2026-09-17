@@ -37,6 +37,9 @@ base:
   # aman untuk endpoint RPC publik; tingkatkan hanya setelah ukur rate limit.
   pool_sync_poll_interval_ms: 1000
   pool_sync_batch_size: 1
+  # Biarkan kosong pada production paper. Testnet memakai daftar factory
+  # eksplisit di config/testnet.yaml yang terpisah.
+  factory_addresses: []
   private_key_env: BASE_PRIVATE_KEY
 
 strategies:
@@ -52,6 +55,13 @@ strategies:
       poll_interval_ms: 5000
       amm_fee_bps: 30
       entry_exit_gas_eth: "0.0001"
+    # Tidak digunakan pada production paper. Mode live mainnet tetap diblokir.
+    testnet_execution:
+      enabled: false
+      routes: []
+      slippage_bps: 300
+      deadline_secs: 60
+      max_entries_per_run: 1
     safety:
       check_honeypot: true
       check_ownership_renounced: true

@@ -3,4 +3,5 @@
 data/*.db
 data/*.db-journal
 /config/production.yaml
+/config/testnet.yaml
 .DS_Store

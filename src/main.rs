@@ -80,7 +80,7 @@ async fn main() -> Result<()> {
             .context("RPC Base tidak cocok dengan mode aplikasi")?;
     }
     let wallet_address = executor.signer_address();
-    // Blueprint §8: simulasi eth_call pre-submit (paper dan live).
+    // Blueprint §8: simulasi eth_call pre-submit (paper dan broadcast on-chain).
     let simulator = if cfg.simulation.pre_submit {
         Some(Simulator::new(
             executor.read_provider().clone(),
@@ -115,6 +115,8 @@ async fn main() -> Result<()> {
 
     let shared = SharedState {
         mode: cfg.mode,
+        armed: cfg.risk.armed,
+        wallet_address,
         config: cfg.strategies.clone(),
         base_addresses: cfg.base.addresses.clone(),
         market: market.clone(),
@@ -240,6 +242,10 @@ async fn main() -> Result<()> {
             StaticInfo {
                 mode: cfg.mode,
                 armed: cfg.risk.armed,
+                testnet_pipeline_armed: matches!(cfg.mode, crypto_copy_bot::config::Mode::Testnet)
+                    && cfg.risk.armed
+                    && cfg.strategies.sniper.enabled
+                    && cfg.strategies.sniper.testnet_execution.enabled,
                 started,
             },
             metrics.clone(),

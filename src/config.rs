@@ -200,20 +200,97 @@ impl AppConfig {
 
     /// Fail closed berdasarkan kemampuan aplikasi yang benar-benar tersedia.
     ///
-    /// Executor Base sudah ada, tetapi revisi ini belum memiliki producer
-    /// `BaseOrder` dari strategi mana pun. Mengizinkan startup non-paper dalam
-    /// keadaan armed akan memberi kesan keliru bahwa bot dapat berdagang.
-    /// Guard ini harus dipersempit/dihapus hanya setelah jalur order
-    /// production-ready (quote, calldata, simulation, dan test end-to-end)
-    /// benar-benar ditambahkan.
+    /// Jalur yang tersedia saat ini sengaja dibatasi pada satu BUY V2 sniper
+    /// di Base Sepolia. Ia membutuhkan route/factory/router eksplisit,
+    /// simulation pre-submit, dan allowlist router eksplisit. Live mainnet
+    /// tetap ditolak sampai testnet E2E serta position/exit manager selesai.
     pub fn validate_current_capabilities(&self) -> Result<()> {
-        if !self.mode.is_paper() && self.risk.armed {
-            anyhow::bail!(
-                "mode {:?} dengan risk.armed=true belum didukung: tidak ada producer \
-                 BaseOrder production-ready. Tetapkan risk.armed=false sampai jalur \
-                 strategi → quote/calldata → risk → execution telah diimplementasikan \
-                 dan diuji end-to-end",
-                self.mode
+        match (self.mode, self.risk.armed) {
+            (Mode::Testnet, true) => self.validate_testnet_sniper_pipeline()?,
+            (Mode::Live, true) => anyhow::bail!(
+                "mode live dengan risk.armed=true belum didukung. Jalur sniper \
+                 yang tersedia hanya untuk Base Sepolia/testnet; jangan arm \
+                 mainnet sebelum testnet E2E, approval policy, dan position/exit \
+                 manager selesai serta direview."
+            ),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn validate_testnet_sniper_pipeline(&self) -> Result<()> {
+        let sniper = &self.strategies.sniper;
+        let execution = &sniper.testnet_execution;
+
+        anyhow::ensure!(
+            sniper.enabled && execution.enabled,
+            "testnet armed memerlukan strategies.sniper.enabled=true dan \
+             strategies.sniper.testnet_execution.enabled=true"
+        );
+        anyhow::ensure!(
+            execution.max_entries_per_run == 1,
+            "testnet sniper hanya mengizinkan max_entries_per_run=1 untuk \
+             membatasi blast radius"
+        );
+        anyhow::ensure!(
+            !execution.routes.is_empty(),
+            "testnet sniper memerlukan minimal satu route V2 eksplisit"
+        );
+        anyhow::ensure!(
+            !self.risk.allowed_routers.is_empty(),
+            "testnet armed memerlukan risk.allowed_routers eksplisit; \
+             default router mainnet tidak boleh dipakai pada testnet"
+        );
+        anyhow::ensure!(
+            !self.base.factory_addresses.is_empty(),
+            "testnet armed memerlukan base.factory_addresses eksplisit"
+        );
+        anyhow::ensure!(
+            !sniper.safety.requires_unimplemented_check(),
+            "testnet sniper menolak safety check yang belum diimplementasikan. \
+             Gunakan token test yang Anda kontrol dan set semua \
+             strategies.sniper.safety check_* ke false untuk testnet."
+        );
+        anyhow::ensure!(
+            sniper.max_buy_eth > Decimal::ZERO && sniper.min_liquidity_eth > Decimal::ZERO,
+            "max_buy_eth dan min_liquidity_eth sniper harus lebih dari nol"
+        );
+        anyhow::ensure!(
+            execution.slippage_bps < 10_000,
+            "testnet_execution.slippage_bps harus kurang dari 10000"
+        );
+        anyhow::ensure!(
+            (1..=300).contains(&execution.deadline_secs),
+            "testnet_execution.deadline_secs harus antara 1 dan 300 detik"
+        );
+
+        let mut factories = std::collections::HashSet::new();
+        for route in &execution.routes {
+            anyhow::ensure!(
+                route.factory != Address::ZERO
+                    && route.router != Address::ZERO
+                    && route.wrapped_native != Address::ZERO,
+                "route testnet tidak boleh memakai address zero"
+            );
+            anyhow::ensure!(
+                route.fee_bps < 10_000,
+                "route factory {} memiliki fee_bps tidak valid",
+                route.factory
+            );
+            anyhow::ensure!(
+                factories.insert(route.factory),
+                "route testnet duplikat untuk factory {}",
+                route.factory
+            );
+            anyhow::ensure!(
+                self.base.factory_addresses.contains(&route.factory),
+                "factory route {} tidak ada di base.factory_addresses",
+                route.factory
+            );
+            anyhow::ensure!(
+                self.risk.allowed_routers.contains(&route.router),
+                "router route {} tidak ada di risk.allowed_routers",
+                route.router
             );
         }
         Ok(())
@@ -250,6 +327,14 @@ pub struct BaseCfg {
     /// Dibatasi saat runtime untuk menjaga RPC publik dari burst berlebihan.
     #[serde(default = "default_pool_sync_batch_size")]
     pub pool_sync_batch_size: usize,
+    /// Factory yang dipantau secara eksplisit. Bila kosong, aplikasi memakai
+    /// daftar factory Base mainnet bawaan di `addresses`.
+    ///
+    /// Testnet wajib mengisi field ini dengan factory V2 yang benar-benar
+    /// dipakai route sniper; alamat default mainnet tidak boleh diasumsikan
+    /// tersedia di Base Sepolia.
+    #[serde(default)]
+    pub factory_addresses: Vec<Address>,
     /// Umur maksimum market state sebelum dianggap stale (ms) —
     /// blueprint §4.3 freshness guard.
     #[serde(default = "default_stale_ms")]
@@ -485,6 +570,10 @@ pub struct SniperCfg {
     pub safety: SafetyCfg,
     #[serde(default)]
     pub paper_simulation: PaperSimulationCfg,
+    /// Jalur order terbatas untuk Base Sepolia. Ini bukan enablement mainnet:
+    /// `mode: live` tetap fail-closed walaupun field ini aktif.
+    #[serde(default)]
+    pub testnet_execution: TestnetSniperExecutionCfg,
 }
 
 impl Default for SniperCfg {
@@ -498,8 +587,64 @@ impl Default for SniperCfg {
             auto_sl_pct: Decimal::from(20),
             safety: SafetyCfg::default(),
             paper_simulation: PaperSimulationCfg::default(),
+            testnet_execution: TestnetSniperExecutionCfg::default(),
         }
     }
+}
+
+/// Konfigurasi producer `BaseOrder` sniper yang dibatasi untuk testnet.
+///
+/// Hanya swap satu-hop native ETH -> token pada router V2-compatible. Route
+/// dan router sengaja harus ditulis eksplisit operator agar tidak ada
+/// discovery router dinamis atau fallback ke alamat mainnet.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestnetSniperExecutionCfg {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub routes: Vec<TestnetV2RouteCfg>,
+    #[serde(default = "default_testnet_slippage_bps")]
+    pub slippage_bps: u32,
+    #[serde(default = "default_testnet_deadline_secs")]
+    pub deadline_secs: u64,
+    /// Hard safety cap. `validate_current_capabilities` menerima tepat satu
+    /// entry ketika testnet di-arm.
+    #[serde(default = "default_testnet_max_entries_per_run")]
+    pub max_entries_per_run: u32,
+}
+
+impl Default for TestnetSniperExecutionCfg {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            routes: Vec::new(),
+            slippage_bps: default_testnet_slippage_bps(),
+            deadline_secs: default_testnet_deadline_secs(),
+            max_entries_per_run: default_testnet_max_entries_per_run(),
+        }
+    }
+}
+
+fn default_testnet_slippage_bps() -> u32 {
+    300
+}
+
+fn default_testnet_deadline_secs() -> u64 {
+    60
+}
+
+fn default_testnet_max_entries_per_run() -> u32 {
+    1
+}
+
+/// Satu route V2 native ETH -> token untuk factory yang dipantau.
+#[derive(Debug, Clone, Deserialize)]
+pub struct TestnetV2RouteCfg {
+    pub factory: Address,
+    pub router: Address,
+    pub wrapped_native: Address,
+    #[serde(default = "default_amm_fee_bps")]
+    pub fee_bps: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -555,6 +700,17 @@ impl Default for SafetyCfg {
             check_holder_distribution: true,
             max_holder_pct: Decimal::from(5),
         }
+    }
+}
+
+impl SafetyCfg {
+    /// Semua check ini sebelumnya hanya metadata paper model. Testnet armed
+    /// tidak boleh mengklaim lulus pemeriksaan yang belum diimplementasikan.
+    pub fn requires_unimplemented_check(&self) -> bool {
+        self.check_honeypot
+            || self.check_ownership_renounced
+            || self.check_lp_locked
+            || self.check_holder_distribution
     }
 }
 
@@ -859,13 +1015,15 @@ mod tests {
     }
 
     #[test]
-    fn armed_non_paper_startup_is_rejected_until_order_producer_exists() {
+    fn armed_testnet_requires_complete_explicit_sniper_route_and_live_stays_blocked() {
         let yaml = r#"
 mode: testnet
 risk:
   daily_loss_limit_pct: 3
   kill_switch_drawdown_pct: 10
   armed: true
+  allowed_routers:
+    - "0x00000000000000000000000000000000000000a1"
 monitor:
   telegram_bot_token_env: TG_TOKEN
   telegram_chat_id_env: TG_CHAT
@@ -877,17 +1035,64 @@ base:
   http_url: https://example.test
   mev_rpc_url: null
   private_key_env: BASE_PRIVATE_KEY
+  factory_addresses:
+    - "0x00000000000000000000000000000000000000f1"
+strategies:
+  sniper:
+    enabled: true
+    max_buy_eth: "0.01"
+    min_liquidity_eth: "0.01"
+    auto_tp_pct: "50"
+    auto_sl_pct: "20"
+    safety:
+      check_honeypot: false
+      check_ownership_renounced: false
+      check_lp_locked: false
+      check_holder_distribution: false
+      max_holder_pct: "5"
+    testnet_execution:
+      enabled: true
+      slippage_bps: 300
+      deadline_secs: 60
+      max_entries_per_run: 1
+      routes:
+        - factory: "0x00000000000000000000000000000000000000f1"
+          router: "0x00000000000000000000000000000000000000a1"
+          wrapped_native: "0x00000000000000000000000000000000000000b1"
+          fee_bps: 30
 "#;
         let cfg: AppConfig = serde_yaml::from_str(yaml).expect("config valid");
 
-        assert!(cfg.validate_current_capabilities().is_err());
+        assert!(cfg.validate_current_capabilities().is_ok());
 
         let mut disarmed = cfg.clone();
         disarmed.risk.armed = false;
         assert!(disarmed.validate_current_capabilities().is_ok());
 
-        let mut paper = cfg;
-        paper.mode = Mode::Paper;
-        assert!(paper.validate_current_capabilities().is_ok());
+        let mut missing_allowlist = cfg.clone();
+        missing_allowlist.risk.allowed_routers.clear();
+        assert!(missing_allowlist.validate_current_capabilities().is_err());
+
+        let mut missing_factory = cfg.clone();
+        missing_factory.base.factory_addresses.clear();
+        assert!(missing_factory.validate_current_capabilities().is_err());
+
+        let mut unimplemented_safety = cfg.clone();
+        unimplemented_safety.strategies.sniper.safety.check_honeypot = true;
+        assert!(unimplemented_safety
+            .validate_current_capabilities()
+            .is_err());
+
+        let mut multiple_entries = cfg.clone();
+        multiple_entries
+            .strategies
+            .sniper
+            .testnet_execution
+            .max_entries_per_run = 2;
+        assert!(multiple_entries.validate_current_capabilities().is_err());
+
+        let mut live = cfg;
+        live.mode = Mode::Live;
+        assert!(live.validate_current_capabilities().is_err());
     }
 }

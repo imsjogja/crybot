@@ -1,0 +1,108 @@
+# Base Sepolia sniper V2 — satu BUY testnet per proses.
+#
+# Salin ke config/testnet.yaml lalu GANTI seluruh address placeholder dengan
+# kontrak testnet yang Anda deploy/verifikasi sendiri:
+# - factory V2 yang memancarkan PairCreated;
+# - router V2-compatible dengan swapExactETHForTokens;
+# - wrapped native token route;
+# - token test yang mempunyai pool terhadap wrapped native.
+#
+# File ini sengaja tidak menyertakan address mainnet atau mengaktifkan mainnet.
+mode: testnet
+
+risk:
+  daily_loss_limit_pct: "3"
+  kill_switch_drawdown_pct: "10"
+  # Tetap false sampai testnet config dan saldo wallet telah diverifikasi.
+  armed: false
+  max_tx_value_eth: "0.001"
+  # WAJIB sama dengan setiap router testnet pada sniper.testnet_execution.routes.
+  allowed_routers:
+    - "0x00000000000000000000000000000000000000a1"
+  allow_sell_during_halt: true
+  circuit_breaker_consecutive_errors: 1
+  max_price_impact_pct: "3"
+
+simulation:
+  # Wajib true untuk mode non-paper.
+  pre_submit: true
+  quote_ttl_ms: 3000
+  # BUY native ETH -> token belum memiliki balance/approval untuk simulasi
+  # SELL yang jujur; exit manager belum tersedia sehingga harus false.
+  require_sell_sim: false
+
+monitor:
+  telegram_bot_token_env: TELEGRAM_BOT_TOKEN
+  telegram_chat_id_env: TELEGRAM_CHAT_ID
+  alert_on_fill: true
+  commands_enabled: true
+
+store:
+  sqlite_path: data/testnet-events.db
+
+web:
+  enabled: true
+  bind: "127.0.0.1:8080"
+
+base:
+  ws_url: "wss://sepolia.base.org"
+  http_url: "https://sepolia.base.org"
+  flashblocks: false
+  mev_rpc_url: null
+  poll_interval_ms: 1000
+  pool_sync_poll_interval_ms: 1000
+  pool_sync_batch_size: 1
+  # WAJIB memuat factory yang sama dengan route V2 di bawah.
+  factory_addresses:
+    - "0x00000000000000000000000000000000000000f1"
+  stale_ms: 10000
+  private_key_env: BASE_PRIVATE_KEY
+
+strategies:
+  sniper:
+    enabled: true
+    # Nilai kecil; testnet pipeline menolak max_entries_per_run selain 1.
+    max_buy_eth: "0.001"
+    min_liquidity_eth: "0.001"
+    auto_tp_pct: "50"
+    auto_sl_pct: "20"
+    # Semua check berikut belum memiliki implementasi on-chain yang dapat
+    # diaudit. Untuk testnet, gunakan token yang Anda kontrol dan set false.
+    safety:
+      check_honeypot: false
+      check_ownership_renounced: false
+      check_lp_locked: false
+      check_holder_distribution: false
+      max_holder_pct: "5"
+    paper_simulation:
+      enabled: false
+    testnet_execution:
+      enabled: true
+      slippage_bps: 300
+      deadline_secs: 60
+      max_entries_per_run: 1
+      routes:
+        - factory: "0x00000000000000000000000000000000000000f1"
+          router: "0x00000000000000000000000000000000000000a1"
+          wrapped_native: "0x00000000000000000000000000000000000000b1"
+          fee_bps: 30
+
+  copy_onchain:
+    enabled: false
+    target_wallets: []
+  price_feeds: []
+  grid_dca:
+    enabled: false
+    grids: []
+    dca_plans: []
+  arbitrage:
+    enabled: false
+    monitored_pools: []
+  yield_farming:
+    enabled: false
+    positions: []
+  perps:
+    enabled: false
+    exchange_router: null
+    reader: null
+    positions: []

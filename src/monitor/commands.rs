@@ -46,6 +46,7 @@ pub fn parse_callback(data: &str) -> Command {
 pub struct StaticInfo {
     pub mode: Mode,
     pub armed: bool,
+    pub testnet_pipeline_armed: bool,
     pub started: Instant,
 }
 
@@ -56,10 +57,12 @@ pub fn build_status(info: &StaticInfo, metrics: &SharedMetrics, risk: &SharedRis
         Mode::Testnet => "🔧 TESTNET",
         Mode::Live => "💵 LIVE",
     };
-    let exec_label = if info.armed {
-        "⛔ DIBLOKIR — belum ada producer BaseOrder"
+    let exec_label = if info.testnet_pipeline_armed {
+        "⚠️ TESTNET ARM — maksimal satu BUY V2, wajib lolos risk + eth_call"
+    } else if info.armed {
+        "⛔ DIBLOKIR — mode live/mainnet belum didukung"
     } else {
-        "🔒 NONAKTIF — aplikasi belum siap broadcast"
+        "🔒 NONAKTIF — risk.armed=false"
     };
     let halt_label = if risk.is_halted() {
         "⛔ HALT AKTIF — BUY diblokir"

@@ -788,6 +788,20 @@ async fn dual_write_structured(
         .execute(pool)
         .await
         .map(|_| ()),
+        "trade_intent" => sqlx::query(
+            "INSERT INTO orders (ts_ms, strategy, pair, side, router, value_wei, status)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(entry.ts_ms)
+        .bind(parsed["strategy"].as_str().unwrap_or(""))
+        .bind(parsed["pair"].as_str().unwrap_or(""))
+        .bind(parsed["side"].as_str().unwrap_or(""))
+        .bind(parsed["router"].as_str().unwrap_or(""))
+        .bind(parsed["value_wei"].as_str().unwrap_or(""))
+        .bind(parsed["status"].as_str().unwrap_or("enqueued"))
+        .execute(pool)
+        .await
+        .map(|_| ()),
         "strategy_decision" => {
             let decision = match serde_json::from_str::<StrategyDecision>(&entry.payload) {
                 Ok(decision)
@@ -1095,6 +1109,51 @@ mod tests {
 
         drop(tx);
         handle.await.unwrap();
+        bersihkan(&path);
+    }
+
+    #[tokio::test]
+    async fn trade_intent_disimpan_di_orders_untuk_audit_testnet() {
+        let (pool, path) = pool_temp("trade-intent").await;
+        let (tx, rx) = mpsc::channel(16);
+        let (tx_ws, _) = tokio::sync::broadcast::channel(16);
+        let handle = tokio::spawn(run_store(rx, pool.clone(), tx_ws));
+
+        tx.send(LogEntry {
+            kind: "trade_intent".into(),
+            payload: serde_json::json!({
+                "strategy": "sniper",
+                "pair": "WETH/TEST",
+                "side": "Buy",
+                "router": "0x00000000000000000000000000000000000000a1",
+                "value_wei": "1000000000000000",
+                "status": "enqueued",
+                "testnet_only": true,
+            })
+            .to_string(),
+            ts_ms: 1234,
+        })
+        .await
+        .unwrap();
+        drop(tx);
+        handle.await.unwrap();
+
+        let order: (i64, String, String, String, String, String, String) = sqlx::query_as(
+            "SELECT ts_ms, strategy, pair, side, router, value_wei, status
+             FROM orders ORDER BY id DESC LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(order.0, 1234);
+        assert_eq!(order.1, "sniper");
+        assert_eq!(order.2, "WETH/TEST");
+        assert_eq!(order.3, "Buy");
+        assert_eq!(order.4, "0x00000000000000000000000000000000000000a1");
+        assert_eq!(order.5, "1000000000000000");
+        assert_eq!(order.6, "enqueued");
+
+        pool.close().await;
         bersihkan(&path);
     }
 

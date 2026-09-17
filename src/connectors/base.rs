@@ -532,6 +532,9 @@ impl BaseConnector {
 
     /// Alamat factory yang diawasi: dari config sniper + default BaseAddresses.
     fn factory_addresses(&self) -> Vec<Address> {
+        if !self.config.factory_addresses.is_empty() {
+            return self.config.factory_addresses.clone();
+        }
         let a = &self.config.addresses;
         vec![
             a.aerodrome_pool_factory,

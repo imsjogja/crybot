@@ -60,6 +60,9 @@ base:
   # Dibuat konservatif untuk RPC publik: satu pool per detik.
   pool_sync_poll_interval_ms: 1000
   pool_sync_batch_size: 1
+  # Kosong = daftar factory Base mainnet bawaan. Base Sepolia/testnet WAJIB
+  # mengisinya eksplisit di config/testnet.yaml (jangan memakai default ini).
+  factory_addresses: []
   # Market state lebih tua dari ini (ms) dianggap stale (blueprint §4).
   stale_ms: 10000
   private_key_env: BASE_PRIVATE_KEY
@@ -78,6 +81,14 @@ strategies:
       poll_interval_ms: 5000
       amm_fee_bps: 30
       entry_exit_gas_eth: "0.0001"
+    # Producer order hanya untuk Base Sepolia/testnet dan default OFF.
+    # Live mainnet tetap fail-closed walaupun block ini diaktifkan.
+    testnet_execution:
+      enabled: false
+      routes: []
+      slippage_bps: 300
+      deadline_secs: 60
+      max_entries_per_run: 1
     safety:
       check_honeypot: true
       check_ownership_renounced: true

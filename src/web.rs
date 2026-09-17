@@ -118,8 +118,8 @@ fn build_status_json(st: &WebState) -> Value {
         "uptime_sec": uptime_sec,
         "wallet_address": st.wallet_address,
         "base_http_url": st.base_http_url,
-        "execution": execution_capability(),
-        "strategies": strategy_statuses(&st.strategies, st.mode),
+        "execution": execution_capability(st.mode, st.armed, &st.strategies),
+        "strategies": strategy_statuses(&st.strategies, st.mode, st.armed),
         "risk": st.risk.status_json(),
         "metrics": {
             "new_heads_received": snap.new_heads_received,
@@ -197,13 +197,31 @@ async fn build_signals_json(pool: &SqlitePool) -> Value {
     json!({"signals": signals})
 }
 
-fn execution_capability() -> Value {
-    json!({
-        "ready": false,
-        "state": "blocked_no_order_producer",
-        "reason": "Tidak ada strategi yang menghasilkan BaseOrder production-ready; \
-                   aplikasi tidak dapat broadcast transaksi.",
-    })
+fn execution_capability(mode: Mode, armed: bool, strategies: &StrategiesCfg) -> Value {
+    if matches!(mode, Mode::Testnet)
+        && armed
+        && strategies.sniper.enabled
+        && strategies.sniper.testnet_execution.enabled
+    {
+        json!({
+            "ready": true,
+            "state": "testnet_ready",
+            "reason": "Sniper V2 Base Sepolia dapat membuat maksimal satu BaseOrder; \
+                       risk, eth_call, dan receipt lifecycle wajib lolos. Live mainnet tetap diblokir.",
+        })
+    } else if matches!(mode, Mode::Live) {
+        json!({
+            "ready": false,
+            "state": "live_blocked_pending_testnet_e2e",
+            "reason": "Mainnet live tetap ditolak sampai testnet E2E, approval policy, dan position/exit manager selesai.",
+        })
+    } else {
+        json!({
+            "ready": false,
+            "state": "monitor_or_paper",
+            "reason": "Tidak ada broadcast aktif. Aktifkan route testnet eksplisit dan risk.armed hanya untuk Base Sepolia.",
+        })
+    }
 }
 
 fn strategy_status(name: &str, enabled: bool, capability: &str, reason: &str) -> Value {
@@ -211,18 +229,26 @@ fn strategy_status(name: &str, enabled: bool, capability: &str, reason: &str) ->
         "name": name,
         "enabled": enabled,
         "capability": capability,
-        "execution_ready": false,
+        "execution_ready": capability == "testnet_order_pipeline",
         "reason": reason,
     })
 }
 
-fn strategy_statuses(strategies: &StrategiesCfg, mode: Mode) -> Vec<Value> {
+fn strategy_statuses(strategies: &StrategiesCfg, mode: Mode, armed: bool) -> Vec<Value> {
     let sniper = if !strategies.sniper.enabled {
         strategy_status(
             "sniper",
             false,
             "disabled",
             "Dinonaktifkan oleh konfigurasi.",
+        )
+    } else if matches!(mode, Mode::Testnet) && armed && strategies.sniper.testnet_execution.enabled
+    {
+        strategy_status(
+            "sniper",
+            true,
+            "testnet_order_pipeline",
+            "Satu BUY V2 Base Sepolia dapat masuk ke risk → simulation → execution; mainnet live tidak didukung.",
         )
     } else if mode.is_paper() && strategies.sniper.paper_simulation.enabled {
         strategy_status(
@@ -391,14 +417,14 @@ fn strategy_statuses(strategies: &StrategiesCfg, mode: Mode) -> Vec<Value> {
     ]
 }
 
-fn build_strategies_json(strategies: &StrategiesCfg, mode: Mode) -> Value {
-    let statuses = strategy_statuses(strategies, mode);
+fn build_strategies_json(strategies: &StrategiesCfg, mode: Mode, armed: bool) -> Value {
+    let statuses = strategy_statuses(strategies, mode, armed);
     json!({"strategies": [
         {
             "name": "sniper",
             "enabled": strategies.sniper.enabled,
             "capability": statuses[0]["capability"].clone(),
-            "execution_ready": false,
+            "execution_ready": statuses[0]["execution_ready"].clone(),
             "reason": statuses[0]["reason"].clone(),
             "configured": !strategies.sniper.dex_factories.is_empty(),
             "configured_factories": strategies.sniper.dex_factories.len(),
@@ -481,7 +507,7 @@ async fn api_strategies(State(st): State<Shared>, headers: HeaderMap) -> impl In
     if !authorized(&st, &headers) {
         return unauthorized().into_response();
     }
-    Json(build_strategies_json(&st.strategies, st.mode)).into_response()
+    Json(build_strategies_json(&st.strategies, st.mode, st.armed)).into_response()
 }
 
 type PositionRow = (String, String, String, String, f64, f64, i64, Option<f64>);
@@ -668,7 +694,7 @@ async fn ws_status(socket: WebSocket, st: Shared) {
     let trades = build_trades_json(&st.pool).await;
     let signals = build_signals_json(&st.pool).await;
     let decisions = build_decisions_json(&st.pool).await;
-    let strategies = build_strategies_json(&st.strategies, st.mode);
+    let strategies = build_strategies_json(&st.strategies, st.mode, st.armed);
     let paper_performance = paper_performance_json(&st.pool).await.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "gagal query paper performance untuk WS init");
         json!({"aggregate": {}, "positions": []})
@@ -806,10 +832,20 @@ mod tests {
     }
 
     #[test]
-    fn execution_capability_is_explicitly_blocked() {
-        let capability = execution_capability();
+    fn execution_capability_reports_paper_and_testnet_states_honestly() {
+        let mut strategies = StrategiesCfg::default();
+        let capability = execution_capability(Mode::Paper, false, &strategies);
         assert_eq!(capability["ready"], false);
-        assert_eq!(capability["state"], "blocked_no_order_producer");
+        assert_eq!(capability["state"], "monitor_or_paper");
+
+        strategies.sniper.enabled = true;
+        strategies.sniper.testnet_execution.enabled = true;
+        let testnet = execution_capability(Mode::Testnet, true, &strategies);
+        assert_eq!(testnet["ready"], true);
+        assert_eq!(testnet["state"], "testnet_ready");
+        let sniper = &strategy_statuses(&strategies, Mode::Testnet, true)[0];
+        assert_eq!(sniper["capability"], "testnet_order_pipeline");
+        assert_eq!(sniper["execution_ready"], true);
     }
 
     #[test]
@@ -817,7 +853,7 @@ mod tests {
         let mut strategies = StrategiesCfg::default();
         strategies.copy_onchain.enabled = true;
         assert_eq!(
-            strategy_statuses(&strategies, Mode::Paper)[1]["capability"],
+            strategy_statuses(&strategies, Mode::Paper, false)[1]["capability"],
             "blocked_missing_wallet_targets"
         );
 
@@ -826,7 +862,7 @@ mod tests {
             .target_wallets
             .push(target_wallet(alloy::primitives::Address::repeat_byte(0x11)));
         assert_eq!(
-            strategy_statuses(&strategies, Mode::Paper)[1]["capability"],
+            strategy_statuses(&strategies, Mode::Paper, false)[1]["capability"],
             "observe_only"
         );
     }
@@ -834,7 +870,7 @@ mod tests {
     #[test]
     fn strategy_json_has_capability_for_all_supported_strategies() {
         let strategies = StrategiesCfg::default();
-        let document = build_strategies_json(&strategies, Mode::Paper);
+        let document = build_strategies_json(&strategies, Mode::Paper, false);
         let items = document["strategies"].as_array().expect("strategies array");
 
         assert_eq!(items.len(), 6);

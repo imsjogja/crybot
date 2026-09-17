@@ -2,9 +2,11 @@
 
 `crybot` adalah bot monitor Base Network berbasis Rust/Tokio. Saat ini ia
 memantau block dan factory DEX, menyimpan audit log SQLite, serta menyediakan
-model paper untuk strategi sniper. **Ia belum memiliki strategi yang
-menghasilkan `BaseOrder`; tidak ada jalur transaksi testnet atau live yang
-siap digunakan.**
+model paper untuk strategi sniper. Ia juga memiliki **satu pipeline BUY V2
+Base Sepolia yang dibatasi ketat** untuk uji operator: satu entry native ETH →
+token per proses, route/factory/router eksplisit, risk gate, `eth_call`, dan
+receipt lifecycle. Default tetap paper/disarmed. **Live mainnet tidak didukung
+dan selalu fail-closed.**
 
 ## Status capability
 
@@ -14,10 +16,11 @@ siap digunakan.**
 | PoolSync reserve | Aktif hanya untuk pool V2-compatible |
 | PriceTick | Aktif untuk source V2, Uniswap V3, atau Slipstream yang dikonfigurasi |
 | Copy on-chain | Observe-only dari transaksi wallet target yang sudah confirmed |
-| Sniper | Model paper V2 read-only, jika `paper_simulation.enabled: true` |
+| Sniper | Paper V2 read-only, atau satu BUY V2 Base Sepolia bila seluruh guard testnet di-arm |
 | Grid DCA / yield | Menjadwalkan trigger observasional; tidak membuat order |
 | Arbitrage / perps | Tidak siap eksekusi |
-| BaseOrder testnet/live | Belum ada producer; startup non-paper dengan `risk.armed: true` ditolak |
+| BaseOrder testnet | Producer sniper V2 terbatas; hanya `mode: testnet`, route eksplisit, dan `risk.armed: true` |
+| BaseOrder live | Diblokir; tidak ada jalur mainnet |
 
 Fungsi `getReserves()` hanya digunakan untuk pool V2-compatible. Untuk
 Uniswap V3 dan Aerodrome Slipstream, `PriceTick` memakai `slot0.sqrtPriceX96`
@@ -28,20 +31,23 @@ likuiditas concentrated-liquidity.
 
 | Strategi | Capability | Keterangan |
 |---|---|---|
-| Sniper | `paper_model` | Hanya mode paper + simulator V2 aktif; tidak broadcast |
+| Sniper | `paper_model` / `testnet_order_pipeline` | Paper read-only; testnet hanya satu BUY V2 native ETH → token setelah guard lengkap |
 | Copy on-chain | `observe_only` | Membaca transaksi confirmed dan mencatat kandidat review |
 | Grid DCA | `observe_only` | Menghasilkan trigger terjadwal tanpa order |
 | Yield | `observe_only` | Menghasilkan trigger compound tanpa order |
 | Arbitrage | `observe_only` | Mengevaluasi state lokal, tanpa order |
 | Perps | `disabled` | Tidak ada jalur executor perps |
-| Semua strategi | bukan `testnet_ready` / `live_ready` | Tidak ada producer `BaseOrder` |
+| Live mainnet | `live_blocked_pending_testnet_e2e` | Tidak pernah menerima `risk.armed: true` |
 
 ## Safety default
 
 - `mode: paper` dan `risk.armed: false` adalah default.
 - Startup memverifikasi chain ID untuk mode testnet/live.
-- `mode: testnet` atau `mode: live` bersama `risk.armed: true` gagal
-  tertutup karena belum ada producer order production-ready.
+- `mode: live` bersama `risk.armed: true` selalu gagal tertutup.
+- Testnet yang di-arm hanya lolos bila memakai Base Sepolia (`84532`), tepat
+  satu route V2 eksplisit, factory dan router allowlist eksplisit, slippage dan
+  deadline terbatas, serta semua safety check yang belum terimplementasi
+  dimatikan untuk token uji yang dikontrol operator.
 - Private key hanya dibaca dari environment variable `BASE_PRIVATE_KEY`.
 - Dashboard non-loopback wajib memakai `DASHBOARD_TOKEN`.
 - Posisi paper yang tersisa dari process sebelumnya ditandai
@@ -71,6 +77,12 @@ Parameter non-rahasia berada di `config/config.yaml`. Salin
 `config/production.yaml.example` menjadi `config/production.yaml` untuk
 deployment dan jangan commit file tersebut.
 
+Untuk testnet, salin `config/testnet.yaml.example` menjadi
+`config/testnet.yaml`. Semua address di file contoh adalah placeholder dan
+harus diganti dengan factory V2, router V2-compatible, wrapped native token,
+dan pool token uji yang diverifikasi operator. File `config/testnet.yaml`
+diabaikan Git.
+
 Rahasia hanya lewat `.env`:
 
 ```text
@@ -81,9 +93,10 @@ DASHBOARD_TOKEN
 ```
 
 Strategi sniper default tidak aktif secara operasional karena
-`paper_simulation.enabled: false`, meskipun strategi terdaftar dalam
-konfigurasi. Aktifkan simulator hanya di paper mode dan pahami bahwa hasilnya
-adalah quote AMM V2 virtual, bukan fill atau profit on-chain.
+`paper_simulation.enabled: false`. Aktifkan simulator hanya di paper mode dan
+pahami bahwa hasilnya adalah quote AMM V2 virtual, bukan fill atau profit
+on-chain. Jalur testnet berbeda dan tidak boleh di-arm sebelum checklist
+manual di bawah selesai.
 
 Contoh source harga concentrated-liquidity yang eksplisit:
 
@@ -111,8 +124,8 @@ Dashboard Axum tersedia di `web.bind`. Jika bind bukan loopback,
 
 Perintah Telegram `/status`, `/halt`, `/resume`, dan `/stop` tersedia jika
 `monitor.commands_enabled: true` dan credential Telegram diisi. `/halt`
-memblokir order baru melalui risk halt flag; ia tidak mengubah fakta bahwa
-jalur order belum tersedia.
+memblokir BUY baru melalui risk halt flag. Status membedakan paper,
+testnet pipeline yang di-arm, dan mainnet yang diblokir.
 
 ## Docker
 
@@ -144,8 +157,8 @@ dijalankan di CI secara default.
 ```text
 src/
 ├── connectors/    # feed Base, V2 reserve/price, wallet confirmed, scheduler
-├── execution/     # executor dan type BaseOrder, tanpa producer strategi
-├── strategies/    # sniper paper, copy observe-only, dan strategi lain
+├── execution/     # executor, risk/simulation/receipt lifecycle
+├── strategies/    # sniper paper + satu producer BUY V2 testnet, strategi observasional lain
 ├── config.rs
 ├── events.rs
 ├── market.rs
@@ -155,10 +168,26 @@ src/
 └── web.rs
 ```
 
-## Batasan sebelum membuat order
+## Checklist operator Base Sepolia
 
-Sebelum menambahkan broadcast transaksi, implementasikan satu jalur testnet
-yang lengkap: decoder router allowlist, validasi path/deadline/recipient,
-quote dan slippage eksplisit, policy approval, simulasi, receipt lifecycle,
-realized PnL, serta test end-to-end terisolasi. Lihat
-`docs/remediation-plan.md` untuk backlog yang tersisa.
+Sebelum mengubah `risk.armed: true` pada `config/testnet.yaml`:
+
+1. Gunakan wallet disposable yang didanai faucet; jangan gunakan wallet utama.
+2. Verifikasi RPC melaporkan chain ID Base Sepolia `84532`.
+3. Verifikasi bytecode dan ABI factory/router/pool; router harus mendukung
+   `swapExactETHForTokens(uint256,address[],address,uint256)`.
+4. Pastikan factory, router, dan wrapped native di YAML adalah address testnet
+   yang sama dengan pool token uji yang dikontrol operator.
+5. Pastikan `max_buy_eth <= risk.max_tx_value_eth`, likuiditas minimum,
+   slippage, dan deadline sesuai nilai uji kecil.
+6. Jalankan validasi lokal, lalu mulai dengan `risk.armed: false` untuk
+   memastikan monitoring menemukan pool yang diharapkan.
+7. Arm hanya untuk satu uji BUY, pantau `trade_intent`, `risk_decided`,
+   `simulation_failed`/`base_swap`, receipt, dan saldo wallet.
+8. Setelah uji, set kembali `risk.armed: false` dan simpan hash transaksi
+   serta hasilnya sebagai bukti E2E.
+
+Belum ada sell/approval policy, position manager, realized PnL untuk posisi
+on-chain, nonce manager, atau testnet E2E yang tervalidasi. Karena itu
+pipeline ini **bukan** izin untuk live trading. Lihat
+`docs/remediation-plan.md` untuk backlog.

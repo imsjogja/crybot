@@ -1,8 +1,8 @@
 //! Base Network Transaction Executor — mengirim transaksi ke DEX router di Base.
 //!
-//! Mendukung mode paper (simulasi, tidak ada tx broadcast) dan mode live
-//! (tx broadcast via RPC atau MEV-protected RPC). Menggunakan Alloy 1.8
-//! untuk signing dan tx submission.
+//! Mendukung mode paper (simulasi, tidak ada tx broadcast) dan jalur on-chain
+//! (testnet atau live bila capability aplikasi mengizinkannya) melalui RPC atau
+//! MEV-protected RPC. Menggunakan Alloy 1.8 untuk signing dan tx submission.
 //!
 //! # Arsitektur
 //! - `RootProvider` (read-only) untuk RPC calls: balance, receipt, block number.
@@ -15,7 +15,7 @@
 //! Jika env var private key kosong, gunakan random key. Tx tidak benar-benar
 //! dikirim — `execute_swap_paper` mengembalikan fake hash.
 //!
-//! # Mode Live
+//! # Mode on-chain
 //! Private key WAJIB ada di env var (`cfg.private_key_env`). Tx ditandatangani
 //! locally dan dikirim via RPC, atau MEV RPC jika dikonfigurasi (`cfg.mev_rpc_url`).
 
@@ -98,7 +98,7 @@ pub struct BaseExecutor {
     /// MEV-protected RPC URL (opsional), tervalidasi saat startup. Hanya
     /// dipakai untuk final raw-envelope submission.
     mev_rpc_url: Option<Url>,
-    /// `true` = mode simulasi (paper). `false` = mode live (tx broadcast riil).
+    /// `true` = mode simulasi (paper). `false` = broadcast on-chain.
     paper_mode: bool,
 }
 
@@ -108,13 +108,13 @@ impl BaseExecutor {
     /// # Paper mode (`paper = true`)
     /// Jika env var private key kosong, generate random key. Tidak fatal.
     ///
-    /// # Live mode (`paper = false`)
+    /// # On-chain mode (`paper = false`)
     /// Env var private key WAJIB diisi. Jika kosong → `bail!`.
     ///
     /// # Errors
     /// - `http_url` tidak valid (parse error)
     /// - Private key tidak valid (parse error)
-    /// - Mode live tetapi private key kosong
+    /// - Mode broadcast tetapi private key kosong
     pub fn new(cfg: &BaseCfg, paper: bool) -> Result<Self> {
         // Ambil private key dari env var (nama variabel di config, BUKAN key-nya langsung).
         let key_str = std::env::var(&cfg.private_key_env).unwrap_or_default();
@@ -127,9 +127,9 @@ impl BaseExecutor {
                 // Random key — wallet dummy untuk paper mode.
                 PrivateKeySigner::random()
             } else {
-                // Mode live tanpa private key → fatal.
+                // Broadcast on-chain tanpa private key → fatal.
                 anyhow::bail!(
-                    "env var {} wajib diisi untuk mode live (paper=false)",
+                    "env var {} wajib diisi untuk broadcast on-chain (paper=false)",
                     cfg.private_key_env
                 );
             }
@@ -249,7 +249,7 @@ impl BaseExecutor {
         Ok(hash)
     }
 
-    /// Eksekusi swap di DEX router (mode live — tx broadcast riil).
+    /// Eksekusi swap di DEX router (broadcast on-chain).
     ///
     /// Pipeline eksplisit sesuai blueprint §8 (Build → Sign → Submit):
     /// 1. **Build**: nonce, chain id, fee EIP-1559, dan gas limit diambil dari
@@ -348,7 +348,7 @@ impl BaseExecutor {
     ///
     /// # Catatan
     /// Implementasi future bisa ditambah `eth_call` simulation untuk
-    /// validasi calldata sebelum benar-benar mengirim di mode live.
+    /// validasi calldata sebelum benar-benar mengirim transaksi on-chain.
     pub async fn execute_swap_paper(
         &self,
         router: Address,
@@ -428,7 +428,7 @@ fn ensure_expected_chain_id(actual_chain_id: u64, expected_chain_id: u64) -> Res
 /// 2. **Simulation** (bila `simulator` ada): eth_call pre-submit. Untuk order
 ///    BUY dengan `reverse_calldata`, simulasi SELL balik juga wajib lolos
 ///    (§8 sellability/honeypot check). Revert = tx dibatalkan sebelum signing.
-/// 3. **Submit**: paper → simulasi lokal; live → build→sign→submit via
+/// 3. **Submit**: paper → simulasi lokal; on-chain → build→sign→submit via
 ///    RPC/MEV RPC, lalu tunggu receipt — revert on-chain dihitung terpisah (§13).
 /// 4. Outcome dicatat ke risk engine (circuit breaker) + metrics + log.
 #[allow(clippy::too_many_arguments)]
@@ -457,9 +457,27 @@ pub async fn run_base_execution(
             price_impact_pct: order.price_impact_pct,
         };
 
-        if let RiskDecision::Reject { reasons } = risk.evaluate(&intent, quote_ttl_ms) {
-            reject_order(&order, reasons, &metrics, &tx_log, &tx_monitor).await;
-            continue;
+        match risk.evaluate(&intent, quote_ttl_ms) {
+            RiskDecision::Reject { reasons } => {
+                reject_order(&order, reasons, &metrics, &tx_log, &tx_monitor).await;
+                continue;
+            }
+            RiskDecision::Pass => {
+                let _ = tx_log
+                    .send(LogEntry {
+                        kind: "risk_decided".into(),
+                        payload: serde_json::json!({
+                            "decision": "pass",
+                            "strategy": order.strategy.to_string(),
+                            "pair": order.pair,
+                            "side": format!("{:?}", order.side),
+                            "reasons": [],
+                        })
+                        .to_string(),
+                        ts_ms: now_ms(),
+                    })
+                    .await;
+            }
         }
 
         if let Some(sim) = &simulator {
@@ -575,7 +593,7 @@ pub async fn run_base_execution(
                 let _ = tx_log.send(LogEntry { kind: "base_swap".into(), payload: serde_json::json!({"strategy": order.strategy.to_string(), "pair": order.pair, "side": format!("{:?}", order.side), "status": "Unconfirmed", "tx_hash": format!("{tx_hash}"), "router": format!("{}", order.router), "value": format!("{}", order.value), "paper": false, "submit_ack_ms": submit_ack_ms}).to_string(), ts_ms: now_ms() }).await;
                 let _ = tx_monitor
                     .send(MonitorMsg::Info(format!(
-                        "[LIVE] submitted {:?} {} {} tx={tx_hash}",
+                        "[ONCHAIN] submitted {:?} {} {} tx={tx_hash}",
                         order.side, order.pair, order.strategy
                     )))
                     .await;
@@ -669,7 +687,7 @@ async fn emit_swap_event(
     e2e_ms: i64,
 ) {
     let _ = tx_log.send(LogEntry { kind: "base_swap".into(), payload: serde_json::json!({"strategy": order.strategy.to_string(), "pair": order.pair, "side": format!("{:?}", order.side), "status": format!("{:?}", status), "tx_hash": format!("{tx_hash}"), "router": format!("{}", order.router), "value": format!("{}", order.value), "paper": paper, "submit_ack_ms": submit_ack_ms, "e2e_ms": e2e_ms}).to_string(), ts_ms: now_ms() }).await;
-    let tag = if paper { "PAPER" } else { "LIVE" };
+    let tag = if paper { "PAPER" } else { "ONCHAIN" };
     let message = match status {
         ExecutionStatus::Reverted => MonitorMsg::Critical(format!(
             "[{tag}] REVERTED {:?} {} {} tx={tx_hash}",

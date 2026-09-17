@@ -38,6 +38,12 @@ const SIGNAL_COOLDOWN_MS: i64 = 60_000;
 pub struct SharedState {
     /// Mode aplikasi; strategi paper-only harus menolaknya di luar paper.
     pub mode: crate::config::Mode,
+    /// Persetujuan operator untuk mengirim order. Worker testnet tidak boleh
+    /// bahkan membangun intent bila flag ini false.
+    pub armed: bool,
+    /// Wallet signer executor. Calldata swap testnet selalu menetapkan
+    /// recipient ini secara eksplisit, bukan alamat dari event pool.
+    pub wallet_address: Address,
     /// Konfigurasi semua strategi (dari config.yaml).
     pub config: StrategiesCfg,
     /// Alamat kontrak penting Base Network (router, factory, dll).

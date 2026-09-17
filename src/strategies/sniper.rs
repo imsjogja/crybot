@@ -17,11 +17,13 @@ use rust_decimal::Decimal;
 use tokio::sync::{mpsc, watch};
 use tokio::time::MissedTickBehavior;
 
-use crate::config::{PaperSimulationCfg, SniperCfg};
+use crate::config::{PaperSimulationCfg, SniperCfg, TestnetSniperExecutionCfg, TestnetV2RouteCfg};
+use crate::contracts::baseswap::IBaseSwapRouter;
 use crate::contracts::uniswap_v2_pair::IUniswapV2Pair;
 use crate::events::{now_ms, MonitorMsg, StrategyEvent, StrategySource};
+use crate::execution::base_executor::BaseOrder;
 
-use super::common::{get_amount_out, BoundedDedup, StrategyContext};
+use super::common::{get_amount_out, is_contract, price_impact_pct, BoundedDedup, StrategyContext};
 use super::{SharedState, Strategy};
 
 const WETH_BASE: &str = "0x4200000000000000000000000000000000000006";
@@ -95,6 +97,19 @@ struct SniperWorker {
     cfg: SniperCfg,
     seen_pools: BoundedDedup<Address>,
     positions: Vec<VirtualPosition>,
+    last_reserve_read_at: Option<tokio::time::Instant>,
+    reserve_rate_limit_until: Option<tokio::time::Instant>,
+}
+
+/// Worker order producer yang hanya dipakai pada Base Sepolia/testnet.
+///
+/// Satu worker serial + `max_entries_per_run=1` membatasi blast radius
+/// testnet. Ia tidak memiliki exit/approval manager dan tidak pernah aktif
+/// pada mode live mainnet.
+struct TestnetSniperWorker {
+    cfg: SniperCfg,
+    seen_pools: BoundedDedup<Address>,
+    entries_submitted: u32,
     last_reserve_read_at: Option<tokio::time::Instant>,
     reserve_rate_limit_until: Option<tokio::time::Instant>,
 }
@@ -309,35 +324,13 @@ impl SniperWorker {
         pool: Address,
         provider: &alloy::providers::RootProvider,
     ) -> Option<(U256, U256)> {
-        let now = tokio::time::Instant::now();
-        if let Some(cooldown_until) = self.reserve_rate_limit_until {
-            let delay_ms = reserve_cooldown_delay_ms(
-                cooldown_until.saturating_duration_since(now).as_millis() as u64,
-            );
-            if delay_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-            self.reserve_rate_limit_until = None;
-        }
-        if let Some(last_read_at) = self.last_reserve_read_at {
-            let elapsed = tokio::time::Instant::now().saturating_duration_since(last_read_at);
-            let delay_ms = reserve_spacing_delay_ms(elapsed.as_millis() as u64);
-            if delay_ms > 0 {
-                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-            }
-        }
-        self.last_reserve_read_at = Some(tokio::time::Instant::now());
-        match read_reserves(pool, provider).await {
-            Ok(reserves) => Some(reserves),
-            Err(ReserveReadFailure::RateLimited) => {
-                self.reserve_rate_limit_until = Some(
-                    tokio::time::Instant::now()
-                        + std::time::Duration::from_millis(RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS),
-                );
-                None
-            }
-            Err(ReserveReadFailure::Other) => None,
-        }
+        wait_for_reserve_pacing(
+            &mut self.last_reserve_read_at,
+            &mut self.reserve_rate_limit_until,
+            pool,
+            provider,
+        )
+        .await
     }
 
     async fn poll_positions(&mut self, state: &SharedState) {
@@ -423,6 +416,266 @@ impl SniperWorker {
     }
 }
 
+impl TestnetSniperWorker {
+    fn new(cfg: SniperCfg) -> Self {
+        Self {
+            cfg,
+            seen_pools: BoundedDedup::new(MAX_SEEN_POOLS),
+            entries_submitted: 0,
+            last_reserve_read_at: None,
+            reserve_rate_limit_until: None,
+        }
+    }
+
+    async fn run(
+        mut self,
+        mut rx_candidates: mpsc::Receiver<Candidate>,
+        state: SharedState,
+        mut shutdown: watch::Receiver<bool>,
+    ) {
+        loop {
+            tokio::select! {
+                biased;
+
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        tracing::info!("worker sniper testnet berhenti karena shutdown");
+                        return;
+                    }
+                }
+                candidate = rx_candidates.recv() => {
+                    let Some(candidate) = candidate else {
+                        tracing::info!("worker sniper testnet berhenti — channel kandidat ditutup");
+                        return;
+                    };
+                    self.process_candidate(candidate, &state).await;
+                }
+            }
+        }
+    }
+
+    async fn process_candidate(&mut self, candidate: Candidate, state: &SharedState) {
+        let Candidate {
+            pool,
+            token0,
+            token1,
+            factory,
+            dex,
+            ..
+        } = candidate;
+        let ctx = StrategyContext::new("sniper", StrategySource::Sniper, state);
+        let pair = format!("{token0}/{token1}");
+
+        if !self.seen_pools.insert_if_new(pool) {
+            ctx.decision(
+                pair,
+                "skip_duplicate",
+                vec!["pool sudah pernah diproses".into()],
+                Some(serde_json::json!({"pool": pool.to_string()})),
+            )
+            .await;
+            return;
+        }
+        if self.entries_submitted >= self.cfg.testnet_execution.max_entries_per_run {
+            ctx.decision(
+                pair,
+                "skip_testnet_entry_cap",
+                vec!["batas entry testnet per proses telah tercapai".into()],
+                Some(serde_json::json!({
+                    "pool": pool.to_string(),
+                    "max_entries_per_run": self.cfg.testnet_execution.max_entries_per_run,
+                })),
+            )
+            .await;
+            return;
+        }
+        if !factory_allowed(&factory, &self.cfg.dex_factories) {
+            ctx.decision(
+                pair,
+                "skip_factory",
+                vec!["factory tidak ada dalam allowlist".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "factory": factory.to_string(), "dex": dex})),
+            )
+            .await;
+            return;
+        }
+        let Some(route) = route_for_factory(&self.cfg.testnet_execution, factory).cloned() else {
+            ctx.decision(
+                pair,
+                "skip_missing_testnet_route",
+                vec!["factory tidak memiliki route V2 testnet eksplisit".into()],
+                Some(serde_json::json!({"pool": pool.to_string(), "factory": factory.to_string()})),
+            )
+            .await;
+            return;
+        };
+        let Some(token_out) = wrapped_native_and_token(token0, token1, route.wrapped_native) else {
+            ctx.decision(
+                pair,
+                "skip_non_wrapped_native_pair",
+                vec!["pair tidak memuat wrapped_native route testnet".into()],
+                Some(serde_json::json!({
+                    "pool": pool.to_string(),
+                    "wrapped_native": route.wrapped_native.to_string(),
+                })),
+            )
+            .await;
+            return;
+        };
+        let (token_is_contract, router_is_contract, wrapped_native_is_contract) = tokio::join!(
+            is_contract(&state.provider, token_out),
+            is_contract(&state.provider, route.router),
+            is_contract(&state.provider, route.wrapped_native),
+        );
+        if !token_is_contract || !router_is_contract || !wrapped_native_is_contract {
+            ctx.decision(
+                pair,
+                "skip_missing_contract_code",
+                vec!["token target, router, atau wrapped native tidak memiliki bytecode".into()],
+                Some(serde_json::json!({
+                    "pool": pool.to_string(),
+                    "token_out": token_out.to_string(),
+                    "router": route.router.to_string(),
+                    "wrapped_native": route.wrapped_native.to_string(),
+                })),
+            )
+            .await;
+            return;
+        }
+
+        let Some((reserve0, reserve1)) = self.read_reserves_paced(pool, &state.provider).await
+        else {
+            ctx.decision(
+                pair,
+                "skip_reserve_rpc",
+                vec!["RPC getReserves V2 gagal atau reserve tidak valid".into()],
+                Some(serde_json::json!({"pool": pool.to_string()})),
+            )
+            .await;
+            return;
+        };
+        let Some((wrapped_native_reserve, token_reserve)) =
+            reserves_for_wrapped_native(token0, token1, reserve0, reserve1, route.wrapped_native)
+        else {
+            ctx.decision(
+                pair,
+                "skip_reserve_mapping",
+                vec!["reserve wrapped native/token tidak dapat ditentukan".into()],
+                Some(serde_json::json!({"pool": pool.to_string()})),
+            )
+            .await;
+            return;
+        };
+        if !liquidity_meets_minimum(wrapped_native_reserve, self.cfg.min_liquidity_eth) {
+            ctx.decision(
+                pair,
+                "skip_liquidity",
+                vec!["likuiditas wrapped native di bawah minimum".into()],
+                Some(serde_json::json!({
+                    "pool": pool.to_string(),
+                    "wrapped_native_liquidity_eth": wei_to_eth(wrapped_native_reserve).to_string(),
+                    "min_liquidity_eth": self.cfg.min_liquidity_eth.to_string(),
+                })),
+            )
+            .await;
+            return;
+        }
+
+        let order = match build_testnet_v2_buy_order(
+            &self.cfg,
+            &route,
+            token_out,
+            wrapped_native_reserve,
+            token_reserve,
+            state.wallet_address,
+        ) {
+            Ok(order) => order,
+            Err(error) => {
+                ctx.decision(
+                    pair,
+                    "skip_invalid_testnet_quote",
+                    vec![error.to_string()],
+                    Some(serde_json::json!({"pool": pool.to_string()})),
+                )
+                .await;
+                return;
+            }
+        };
+
+        let intent_payload = serde_json::json!({
+            "strategy": "sniper",
+            "pair": order.pair,
+            "side": "Buy",
+            "router": order.router.to_string(),
+            "value_wei": order.value.to_string(),
+            "pool": pool.to_string(),
+            "factory": factory.to_string(),
+            "token_out": token_out.to_string(),
+            "price_impact_pct": order.price_impact_pct.map(|value| value.to_string()),
+            "status": "enqueued",
+            "testnet_only": true,
+        });
+        match state.tx_base_order.try_reserve() {
+            Ok(permit) => {
+                // Reserve kapasitas terlebih dahulu agar intent hanya dicatat
+                // bila order benar-benar dapat dimasukkan ke pipeline. Kirim
+                // audit intent sebelum permit dilepas ke executor sehingga
+                // urutan producer tetap intent -> execution queue.
+                ctx.log("trade_intent", intent_payload.to_string()).await;
+                permit.send(order);
+                self.entries_submitted += 1;
+                ctx.decision(
+                    pair,
+                    "testnet_order_enqueued",
+                    vec![
+                        "BaseOrder BUY V2 dibuat untuk Base Sepolia; risk, eth_call, dan receipt lifecycle dijalankan executor".into(),
+                    ],
+                    Some(intent_payload.clone()),
+                )
+                .await;
+                ctx.alert(MonitorMsg::Info(
+                    "SNIPER TESTNET: satu BaseOrder BUY V2 masuk ke execution pipeline".into(),
+                ))
+                .await;
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                state.metrics.inc(&state.metrics.skips);
+                ctx.decision(
+                    pair,
+                    "skip_execution_queue_full",
+                    vec!["antrean execution penuh; order testnet tidak dibuat ulang".into()],
+                    Some(serde_json::json!({"pool": pool.to_string()})),
+                )
+                .await;
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                state.metrics.inc(&state.metrics.skips);
+                ctx.decision(
+                    pair,
+                    "skip_execution_unavailable",
+                    vec!["execution channel tertutup; order testnet tidak dibuat ulang".into()],
+                    Some(serde_json::json!({"pool": pool.to_string()})),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn read_reserves_paced(
+        &mut self,
+        pool: Address,
+        provider: &alloy::providers::RootProvider,
+    ) -> Option<(U256, U256)> {
+        wait_for_reserve_pacing(
+            &mut self.last_reserve_read_at,
+            &mut self.reserve_rate_limit_until,
+            pool,
+            provider,
+        )
+        .await
+    }
+}
+
 #[async_trait::async_trait]
 impl Strategy for SniperStrategy {
     fn name(&self) -> &'static str {
@@ -479,9 +732,14 @@ impl Strategy for SniperStrategy {
 
     async fn start(&mut self, state: &SharedState) {
         let ctx = StrategyContext::new(self.name(), StrategySource::Sniper, state);
-        let worker_active = paper_worker_active(&self.cfg, state.mode);
-        let mode = if worker_active {
+        let paper_active = paper_worker_active(&self.cfg, state.mode);
+        let testnet_active = testnet_worker_active(&self.cfg, state.mode, state.armed);
+        let mode = if paper_active {
             "simulator paper V2 read-only aktif; tidak ada transaksi"
+        } else if testnet_active {
+            "worker BUY V2 Base Sepolia aktif; maksimal satu BaseOrder testnet per proses"
+        } else if self.cfg.testnet_execution.enabled {
+            "worker testnet dikonfigurasi tetapi nonaktif karena mode bukan testnet atau risk.armed=false"
         } else if self.cfg.paper_simulation.enabled {
             "simulator paper dikonfigurasi tetapi nonaktif karena mode aplikasi bukan paper atau konfigurasi tidak valid"
         } else {
@@ -495,7 +753,7 @@ impl Strategy for SniperStrategy {
         )
         .await;
         ctx.log("sniper_started", mode.into()).await;
-        if worker_active {
+        if paper_active {
             let (tx_candidates, rx_candidates) = mpsc::channel(SNIPER_CANDIDATE_QUEUE_CAPACITY);
             let worker = SniperWorker::new(self.cfg.clone());
             let worker_state = state.clone();
@@ -508,6 +766,22 @@ impl Strategy for SniperStrategy {
             self.tx_candidates = Some(tx_candidates);
             ctx.alert(MonitorMsg::Info(
                 "SNIPER PAPER: worker simulator V2 read-only aktif; tidak ada transaksi broadcast"
+                    .into(),
+            ))
+            .await;
+        } else if testnet_active {
+            let (tx_candidates, rx_candidates) = mpsc::channel(SNIPER_CANDIDATE_QUEUE_CAPACITY);
+            let worker = TestnetSniperWorker::new(self.cfg.clone());
+            let worker_state = state.clone();
+            let worker_shutdown = state.rx_shutdown.clone();
+            tokio::spawn(async move {
+                worker
+                    .run(rx_candidates, worker_state, worker_shutdown)
+                    .await;
+            });
+            self.tx_candidates = Some(tx_candidates);
+            ctx.alert(MonitorMsg::Warning(
+                "SNIPER TESTNET: satu entry BUY V2 dapat dikirim setelah semua gate lolos; mode live tetap diblokir"
                     .into(),
             ))
             .await;
@@ -579,6 +853,43 @@ async fn read_reserves(
     Err(ReserveReadFailure::Other)
 }
 
+async fn wait_for_reserve_pacing(
+    last_reserve_read_at: &mut Option<tokio::time::Instant>,
+    reserve_rate_limit_until: &mut Option<tokio::time::Instant>,
+    pool: Address,
+    provider: &alloy::providers::RootProvider,
+) -> Option<(U256, U256)> {
+    let now = tokio::time::Instant::now();
+    if let Some(cooldown_until) = *reserve_rate_limit_until {
+        let delay_ms = reserve_cooldown_delay_ms(
+            cooldown_until.saturating_duration_since(now).as_millis() as u64,
+        );
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        *reserve_rate_limit_until = None;
+    }
+    if let Some(last_read_at) = *last_reserve_read_at {
+        let elapsed = tokio::time::Instant::now().saturating_duration_since(last_read_at);
+        let delay_ms = reserve_spacing_delay_ms(elapsed.as_millis() as u64);
+        if delay_ms > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+    }
+    *last_reserve_read_at = Some(tokio::time::Instant::now());
+    match read_reserves(pool, provider).await {
+        Ok(reserves) => Some(reserves),
+        Err(ReserveReadFailure::RateLimited) => {
+            *reserve_rate_limit_until = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RESERVE_RPC_RATE_LIMIT_COOLDOWN_MS),
+            );
+            None
+        }
+        Err(ReserveReadFailure::Other) => None,
+    }
+}
+
 async fn read_reserves_once(
     pool: Address,
     provider: &alloy::providers::RootProvider,
@@ -641,6 +952,10 @@ fn paper_worker_active(cfg: &SniperCfg, mode: crate::config::Mode) -> bool {
     paper_simulator_active(cfg, mode) && simulation_config_is_valid(cfg, &cfg.paper_simulation)
 }
 
+fn testnet_worker_active(cfg: &SniperCfg, mode: crate::config::Mode, armed: bool) -> bool {
+    cfg.testnet_execution.enabled && armed && matches!(mode, crate::config::Mode::Testnet)
+}
+
 fn paper_poll_interval(paper: &PaperSimulationCfg) -> Duration {
     Duration::from_millis(paper.poll_interval_ms)
 }
@@ -664,13 +979,113 @@ fn weth_and_token_reserves(
     let weth = WETH_BASE
         .parse::<Address>()
         .expect("WETH Base address is valid");
-    if token0 == weth && !reserve0.is_zero() && !reserve1.is_zero() {
+    reserves_for_wrapped_native(token0, token1, reserve0, reserve1, weth)
+}
+
+fn reserves_for_wrapped_native(
+    token0: Address,
+    token1: Address,
+    reserve0: U256,
+    reserve1: U256,
+    wrapped_native: Address,
+) -> Option<(U256, U256)> {
+    if token0 == wrapped_native && !reserve0.is_zero() && !reserve1.is_zero() {
         Some((reserve0, reserve1))
-    } else if token1 == weth && !reserve0.is_zero() && !reserve1.is_zero() {
+    } else if token1 == wrapped_native && !reserve0.is_zero() && !reserve1.is_zero() {
         Some((reserve1, reserve0))
     } else {
         None
     }
+}
+
+fn wrapped_native_and_token(
+    token0: Address,
+    token1: Address,
+    wrapped_native: Address,
+) -> Option<Address> {
+    if token0 == wrapped_native && token1 != wrapped_native {
+        Some(token1)
+    } else if token1 == wrapped_native && token0 != wrapped_native {
+        Some(token0)
+    } else {
+        None
+    }
+}
+
+fn route_for_factory(
+    execution: &TestnetSniperExecutionCfg,
+    factory: Address,
+) -> Option<&TestnetV2RouteCfg> {
+    execution
+        .routes
+        .iter()
+        .find(|route| route.factory == factory)
+}
+
+fn min_amount_out(expected_out: U256, slippage_bps: u32) -> Option<U256> {
+    if slippage_bps >= 10_000 {
+        return None;
+    }
+    let kept_bps = 10_000u64.checked_sub(slippage_bps as u64)?;
+    expected_out
+        .checked_mul(U256::from(kept_bps))
+        .map(|value| value / U256::from(10_000u64))
+}
+
+fn build_testnet_v2_buy_order(
+    cfg: &SniperCfg,
+    route: &TestnetV2RouteCfg,
+    token_out: Address,
+    wrapped_native_reserve: U256,
+    token_reserve: U256,
+    recipient: Address,
+) -> Result<BaseOrder, String> {
+    let amount_in =
+        eth_to_wei(cfg.max_buy_eth).ok_or("max_buy_eth tidak dapat dikonversi menjadi wei")?;
+    let expected_out = get_amount_out(
+        amount_in,
+        wrapped_native_reserve,
+        token_reserve,
+        route.fee_bps,
+    );
+    if expected_out.is_zero() {
+        return Err("quote V2 menghasilkan amountOut nol".into());
+    }
+    let amount_out_min = min_amount_out(expected_out, cfg.testnet_execution.slippage_bps)
+        .ok_or("slippage_bps tidak valid")?;
+    if amount_out_min.is_zero() {
+        return Err("amountOutMinimum nol setelah slippage".into());
+    }
+    let deadline = U256::from(
+        (now_ms().max(0) as u64)
+            .saturating_div(1_000)
+            .saturating_add(cfg.testnet_execution.deadline_secs),
+    );
+    let calldata = IBaseSwapRouter::swapExactETHForTokensCall {
+        amountOutMin: amount_out_min,
+        path: vec![route.wrapped_native, token_out],
+        to: recipient,
+        deadline,
+    }
+    .abi_encode();
+    let impact = price_impact_pct(
+        wei_to_eth(amount_in),
+        wei_to_eth(wrapped_native_reserve),
+        wei_to_eth(token_reserve),
+    );
+    Ok(BaseOrder {
+        router: route.router,
+        calldata,
+        value: amount_in,
+        strategy: StrategySource::Sniper,
+        pair: format!("{}/{}", route.wrapped_native, token_out),
+        side: crate::events::Side::Buy,
+        ts_ms: now_ms(),
+        price_impact_pct: Some(impact),
+        // Testnet entry is native ETH -> token, so no pre-existing token
+        // balance/allowance exists for an honest reverse sell simulation.
+        reverse_calldata: None,
+    })
 }
 
 fn liquidity_meets_minimum(weth_reserve: U256, minimum_eth: Decimal) -> bool {
@@ -769,7 +1184,27 @@ fn paper_closed_payload(
 }
 
 fn startup_payload(cfg: &SniperCfg) -> serde_json::Value {
-    serde_json::json!({"enabled": cfg.enabled, "factory_count": cfg.dex_factories.len(), "max_buy_eth": cfg.max_buy_eth.to_string(), "min_liquidity_eth": cfg.min_liquidity_eth.to_string(), "auto_tp_pct": cfg.auto_tp_pct.to_string(), "auto_sl_pct": cfg.auto_sl_pct.to_string(), "paper_simulation": {"enabled": cfg.paper_simulation.enabled, "poll_interval_ms": cfg.paper_simulation.poll_interval_ms, "amm_fee_bps": cfg.paper_simulation.amm_fee_bps, "entry_exit_gas_eth": cfg.paper_simulation.entry_exit_gas_eth.to_string()}})
+    serde_json::json!({
+        "enabled": cfg.enabled,
+        "factory_count": cfg.dex_factories.len(),
+        "max_buy_eth": cfg.max_buy_eth.to_string(),
+        "min_liquidity_eth": cfg.min_liquidity_eth.to_string(),
+        "auto_tp_pct": cfg.auto_tp_pct.to_string(),
+        "auto_sl_pct": cfg.auto_sl_pct.to_string(),
+        "paper_simulation": {
+            "enabled": cfg.paper_simulation.enabled,
+            "poll_interval_ms": cfg.paper_simulation.poll_interval_ms,
+            "amm_fee_bps": cfg.paper_simulation.amm_fee_bps,
+            "entry_exit_gas_eth": cfg.paper_simulation.entry_exit_gas_eth.to_string(),
+        },
+        "testnet_execution": {
+            "enabled": cfg.testnet_execution.enabled,
+            "route_count": cfg.testnet_execution.routes.len(),
+            "slippage_bps": cfg.testnet_execution.slippage_bps,
+            "deadline_secs": cfg.testnet_execution.deadline_secs,
+            "max_entries_per_run": cfg.testnet_execution.max_entries_per_run,
+        },
+    })
 }
 
 #[cfg(test)]
@@ -896,6 +1331,102 @@ mod tests {
         assert!(paper_simulator_active(&cfg, crate::config::Mode::Paper));
         assert!(!paper_simulator_active(&cfg, crate::config::Mode::Testnet));
         assert!(!paper_simulator_active(&cfg, crate::config::Mode::Live));
+    }
+
+    #[test]
+    fn testnet_worker_requires_testnet_mode_and_operator_arming() {
+        let mut cfg = SniperCfg::default();
+        cfg.testnet_execution.enabled = true;
+        assert!(testnet_worker_active(
+            &cfg,
+            crate::config::Mode::Testnet,
+            true
+        ));
+        assert!(!testnet_worker_active(
+            &cfg,
+            crate::config::Mode::Testnet,
+            false
+        ));
+        assert!(!testnet_worker_active(
+            &cfg,
+            crate::config::Mode::Live,
+            true
+        ));
+    }
+
+    #[test]
+    fn v2_order_builder_applies_slippage_and_encodes_exact_native_buy() {
+        let factory = Address::repeat_byte(0x01);
+        let router = Address::repeat_byte(0x02);
+        let wrapped_native = Address::repeat_byte(0x03);
+        let token_out = Address::repeat_byte(0x04);
+        let cfg = SniperCfg {
+            max_buy_eth: Decimal::new(1, 2), // 0.01 ETH
+            testnet_execution: TestnetSniperExecutionCfg {
+                slippage_bps: 300,
+                deadline_secs: 60,
+                ..TestnetSniperExecutionCfg::default()
+            },
+            ..SniperCfg::default()
+        };
+        let route = TestnetV2RouteCfg {
+            factory,
+            router,
+            wrapped_native,
+            fee_bps: 30,
+        };
+        let wrapped_reserve = U256::from(10u128.pow(18));
+        let token_reserve = U256::from(1_000_000u64) * U256::from(10u128.pow(18));
+        let recipient = Address::repeat_byte(0x05);
+
+        let order = build_testnet_v2_buy_order(
+            &cfg,
+            &route,
+            token_out,
+            wrapped_reserve,
+            token_reserve,
+            recipient,
+        )
+        .expect("valid V2 order");
+        assert_eq!(order.router, router);
+        assert_eq!(order.value, U256::from(10_000_000_000_000_000u64));
+        assert_eq!(order.side, crate::events::Side::Buy);
+        assert!(order.price_impact_pct.is_some());
+
+        let decoded = IBaseSwapRouter::swapExactETHForTokensCall::abi_decode(&order.calldata)
+            .expect("calldata decodes");
+        assert_eq!(decoded.path, vec![wrapped_native, token_out]);
+        assert_eq!(decoded.to, recipient);
+        assert!(decoded.amountOutMin > U256::ZERO);
+    }
+
+    #[test]
+    fn v2_minimum_output_never_rounds_up_and_rejects_invalid_slippage() {
+        assert_eq!(
+            min_amount_out(U256::from(1_000), 300),
+            Some(U256::from(970))
+        );
+        assert_eq!(min_amount_out(U256::from(1), 1), Some(U256::ZERO));
+        assert_eq!(min_amount_out(U256::from(1_000), 10_000), None);
+    }
+
+    #[test]
+    fn testnet_route_requires_exact_wrapped_native_pair() {
+        let wrapped = Address::repeat_byte(0x01);
+        let token = Address::repeat_byte(0x02);
+        assert_eq!(
+            wrapped_native_and_token(wrapped, token, wrapped),
+            Some(token)
+        );
+        assert_eq!(
+            wrapped_native_and_token(token, wrapped, wrapped),
+            Some(token)
+        );
+        assert_eq!(
+            reserves_for_wrapped_native(token, wrapped, U256::from(9), U256::from(10), wrapped),
+            Some((U256::from(10), U256::from(9)))
+        );
+        assert_eq!(wrapped_native_and_token(token, token, wrapped), None);
     }
 
     #[test]

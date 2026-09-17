@@ -2,20 +2,22 @@
 
 ## Status saat ini
 
-Crybot saat ini adalah monitor Base Network dan model paper sniper. Executor
-transaksi tersedia sebagai infrastruktur, tetapi belum ada strategi yang
-menghasilkan `BaseOrder`; karena itu aplikasi belum boleh dianggap siap untuk
-testnet atau live trading.
+Crybot adalah monitor Base Network dan model paper sniper, dengan satu jalur
+order terbatas untuk **Base Sepolia**: sniper V2 dapat membuat maksimal satu
+BUY native ETH → token per proses. Jalur ini membutuhkan factory/router/route
+eksplisit, allowlist, risk gate, `eth_call`, dan receipt lifecycle.
 
-Aturan sementara: jangan jalankan `mode: testnet` atau `mode: live` dengan
-`risk.armed: true`. Startup sekarang fail-closed untuk kombinasi tersebut.
+Aturan: default tetap `mode: paper` dan `risk.armed: false`. `mode: live`
+dengan `risk.armed: true` tetap fail-closed. Jalur testnet belum boleh
+dianggap tervalidasi sampai transaksi E2E dengan kontrak uji operator berhasil
+dan dicatat.
 
 ## Urutan kerja
 
 ### P0 — Safety dan kontrak operasional
 
-- [x] Tolak startup non-paper yang armed selama belum ada producer
-  `BaseOrder` production-ready.
+- [x] Tolak startup live yang armed; hanya Base Sepolia yang dapat memakai
+  producer testnet terbatas.
 - [x] Verifikasi chain ID RPC: Base Sepolia (`84532`) untuk testnet dan Base
   mainnet (`8453`) untuk live.
 - [ ] Wire realized PnL dari posisi yang benar-benar tertutup ke
@@ -58,19 +60,23 @@ memiliki satu producer runtime yang diuji.
 
 ### P2 — Satu jalur eksekusi nyata, dimulai dari testnet
 
-- [ ] Pilih satu strategi prioritas; jangan mengaktifkan semua strategi
-  sekaligus. Kandidat paling realistis: copy-on-chain dengan router allowlist.
-- [ ] Decode ABI router yang didukung, validasi token/path/deadline/recipient,
-  lalu hitung sizing dan slippage yang eksplisit.
-- [ ] Bentuk `BaseOrder` berisi quote timestamp, price impact, calldata, dan
-  reverse calldata bila sell simulation diwajibkan.
-- [ ] Tambahkan allowance/approval policy yang eksplisit; tidak ada approval
-  tak terbatas atau approval otomatis tanpa guard.
+- [x] Pilih satu strategi: sniper V2 one-hop native ETH → token untuk Base
+  Sepolia, maksimal satu entry per proses.
+- [x] Decode/encode ABI `swapExactETHForTokens`, validasi pair wrapped-native,
+  factory route, router bytecode, recipient wallet, deadline, sizing,
+  slippage, dan price impact.
+- [x] Bentuk `BaseOrder` dengan quote timestamp, `amountOutMin`, calldata, dan
+  audit `trade_intent`; simulator dan executor menjalankan risk → `eth_call`
+  → receipt lifecycle.
+- [ ] Tambahkan policy approval dan SELL eksplisit untuk exit. BUY native ETH
+  saat ini tidak membutuhkan approval, tetapi tidak boleh diklaim sebagai
+  position manager.
 - [ ] Tambahkan test end-to-end terisolasi untuk strategy → risk → simulator →
   executor testnet, tetap `#[ignore]` di CI.
 
-**Kriteria selesai:** tepat satu strategi dapat mengirim order testnet yang
-terverifikasi, dengan audit log dan receipt lifecycle lengkap.
+**Kriteria selesai:** satu transaksi testnet kecil yang operator-verifikasi
+berhasil melewati pipeline lengkap, receipt serta audit log tersimpan, dan
+hasilnya direview. Kriteria ini **belum terpenuhi**.
 
 ### P3 — Performa, ketahanan, dan state
 
@@ -104,13 +110,21 @@ restart tidak membuat dashboard paper menampilkan posisi phantom.
 
 ## Task yang baru dikerjakan
 
-P0 telah diterapkan: aplikasi fail-closed pada non-paper armed, memverifikasi
-chain ID RPC sebelum task runtime dimulai, dan melaporkan capability runtime
-secara jujur. P1 kini memiliki poller `PoolSync` V2 yang bounded dan listener
+P0 telah diterapkan: aplikasi fail-closed untuk live yang di-arm,
+memverifikasi chain ID RPC sebelum task runtime dimulai, dan melaporkan
+capability runtime secara jujur. P1 kini memiliki poller `PoolSync` V2 yang
+bounded dan listener
 `WalletTx` confirmed untuk target copy-on-chain yang aktif serta scheduler
 shutdown-aware untuk DCA/compound; semuanya tetap tanpa producer order. P3
 kini memindahkan simulator sniper ke worker serial bounded, membatasi
 deduplikasi, menandai posisi paper yang tidak dapat dipulihkan sebagai stale,
 dan memperbaiki fallback WSS→HTTP. Price feed terkonfigurasi juga mendukung
-V2, Uniswap V3, dan Aerodrome Slipstream. Task berikutnya adalah satu jalur
-order testnet yang benar setelah seluruh guard P2 tersedia.
+V2, Uniswap V3, dan Aerodrome Slipstream.
+
+P2 kini memiliki implementasi kode untuk satu jalur BUY V2 Base Sepolia:
+guard konfigurasi strict, factory monitoring eksplisit, worker kandidat
+bounded, quote V2/slippage/deadline, `trade_intent`, risk/simulation/executor,
+dan readiness dashboard/Telegram. Konfigurasi contoh tetap disarmed dan hanya
+memuat placeholder. Task berikutnya adalah menjalankan checklist operator dan
+testnet E2E satu transaksi; live tetap diblokir sampai approval/exit/position,
+realized PnL, dan nonce management tersedia.
